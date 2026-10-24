@@ -55,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.media3.common.util.UnstableApi
 import coil.compose.AsyncImage
+import java.io.File
 
 @UnstableApi
 @Composable
@@ -215,10 +216,6 @@ fun SectionHeading(title: String, action: String? = null, onClick: () -> Unit = 
 @Composable
 fun SearchScreen(model: MusicViewModel, scroll: LazyListState, preview: Boolean = false) {
     val searchResults = model.results
-    val bottomPadding = contentBottomPadding(model.current != null)
-    val leadingItems = if (model.submittedQuery.isBlank()) 4 else
-        (if (model.searchSource != SearchSource.Cloud && !model.localPermission) 1 else 0) +
-        (if (model.cloudSearchError != null) 1 else 0)
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     val requester = remember { FocusRequester() }
@@ -238,7 +235,6 @@ fun SearchScreen(model: MusicViewModel, scroll: LazyListState, preview: Boolean 
                     unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
                     focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { submit() }))
-            LocatePlayingButton(scroll, searchResults, model.current?.key, leadingItems, bottomPadding, enabled = !preview)
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween)) {
@@ -456,14 +452,24 @@ fun SettingsDrawer(model: MusicViewModel, drawerState: DrawerState, close: () ->
             Row(Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 24.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("Sona", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Black)
-                    Text(model.profile?.let { "嗨，${it.name}" } ?: "你的音乐日常", color = scheme.onSurfaceVariant,
+                    val greetingName = model.profile?.name?.takeIf { it.isNotBlank() }
+                        ?: model.localName.takeIf { it.isNotBlank() }
+                    Text(greetingName?.let { "嗨，$it" } ?: "你的音乐日常", color = scheme.onSurfaceVariant,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                val avatar = model.profile?.avatarUrl.orEmpty()
-                if (avatar.isNotBlank()) AsyncImage(model = avatar, contentDescription = "用户头像",
-                    modifier = Modifier.size(44.dp).clip(CircleShape), contentScale = ContentScale.Crop)
-                else ShapeBadge(Icons.Rounded.Person, MaterialShapes.Cookie9Sided, 44.dp,
-                    color = scheme.secondaryContainer, content = scheme.onSecondaryContainer)
+                // One account entry: the avatar opens the account sheet in every state.
+                Box(Modifier.clip(CircleShape).clickable { model.accountVisible = true }) {
+                    when {
+                        model.profile?.avatarUrl.orEmpty().isNotBlank() -> AsyncImage(model = model.profile?.avatarUrl,
+                            contentDescription = "账号", modifier = Modifier.size(44.dp).clip(CircleShape),
+                            contentScale = ContentScale.Crop)
+                        model.localAvatar.isNotBlank() -> AsyncImage(model = File(model.localAvatar),
+                            contentDescription = "账号", modifier = Modifier.size(44.dp).clip(CircleShape),
+                            contentScale = ContentScale.Crop)
+                        else -> ShapeBadge(Icons.Rounded.Person, MaterialShapes.Cookie9Sided, 44.dp,
+                            color = scheme.secondaryContainer, content = scheme.onSecondaryContainer)
+                    }
+                }
             }
             val bottomPadding = if (model.current != null) 96.dp else 16.dp
             Column(Modifier.weight(1f).scrollViewport(16.dp)
@@ -490,22 +496,6 @@ fun SettingsDrawer(model: MusicViewModel, drawerState: DrawerState, close: () ->
             }
             }
             }
-            }
-            val profile = model.profile
-            SegmentedListItem(onClick = {
-                close()
-                if (profile == null) model.page = Page.Login else model.logout()
-            },
-                shapes = ListItemDefaults.segmentedShapes(0, 1).copy(shape = outerCornerShape),
-                colors = ListItemDefaults.segmentedColors(containerColor = scheme.surfaceContainerHigh),
-                leadingContent = { DrawerActionIcon(if (profile == null) Icons.Rounded.Person else Icons.AutoMirrored.Rounded.Logout,
-                    if (profile == null) scheme.secondaryContainer else scheme.tertiaryContainer,
-                    if (profile == null) scheme.onSecondaryContainer else scheme.onTertiaryContainer) },
-                supportingContent = { Text(if (profile == null) "同步云端歌单与收藏" else profile.name,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall) },
-                trailingContent = { Icon(Icons.Rounded.ChevronRight, null) }) {
-                Text(if (profile == null) "登录网易云音乐" else "退出登录", style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold)
             }
             Text("Sona · ${BuildConfig.VERSION_NAME}", Modifier.padding(horizontal = 12.dp, vertical = 8.dp), style = MaterialTheme.typography.labelMedium, color = scheme.onSurfaceVariant)
             }

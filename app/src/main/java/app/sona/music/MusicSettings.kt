@@ -50,6 +50,23 @@ class MusicSettings(context: Context) {
     var lastBoldPlayer: Boolean
         get() = prefs.getBoolean("player_style_bold", false)
         set(value) { prefs.edit().putBoolean("player_style_bold", value).apply() }
+    // Local identity for people who never sign in to NetEase.
+    var localName: String
+        get() = prefs.getString("local_name", "").orEmpty()
+        set(value) { prefs.edit().putString("local_name", value).apply() }
+    var localAvatar: String
+        get() = prefs.getString("local_avatar", "").orEmpty()
+        set(value) { prefs.edit().putString("local_avatar", value).apply() }
+    // The local daily mix is fixed for the day it was generated.
+    var localDailyDate: String
+        get() = prefs.getString("local_daily_date", "").orEmpty()
+        set(value) { prefs.edit().putString("local_daily_date", value).apply() }
+    var localDailyKeys: List<String>
+        get() = runCatching {
+            val array = JSONArray(prefs.getString("local_daily_keys", "[]"))
+            (0 until array.length()).map(array::getString)
+        }.getOrDefault(emptyList())
+        set(value) { prefs.edit().putString("local_daily_keys", JSONArray(value).toString()).apply() }
     @Volatile private var cachedCookie: String? = null
     var cookie: String
         @Synchronized get() {

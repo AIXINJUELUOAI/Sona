@@ -2,10 +2,12 @@
 package app.sona.music
 
 import androidx.compose.animation.Crossfade
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Headphones
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.*
@@ -13,9 +15,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.util.UnstableApi
@@ -32,109 +32,124 @@ internal fun ListeningOverview(model: MusicViewModel, visible: Boolean, close: (
         value = LocalDate.now()
         while (visible) { delay(30_000); value = LocalDate.now() }
     }
-    val scheme = MaterialTheme.colorScheme
-    val todaySongs = history.days[today].orEmpty().values
-    val todayMs = todaySongs.sumOf { it.milliseconds }
+    val todayMs = history.millisecondsOn(today)
+    val todayCount = history.days[today].orEmpty().values.count { it.milliseconds >= 1_000 }
     val weekStart = today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
-    val weekMs = history.days.filterKeys { it >= weekStart && it <= today }.values.sumOf { day ->
-        day.values.sumOf { it.milliseconds }
-    }
+    val weekMs = history.millisecondsBetween(weekStart, today)
     val hasDuration = history.days.values.any { day -> day.values.any { it.milliseconds > 0 } }
-    val frequent = remember(history, today, model.localSongs, model.recent) {
-        val known = (model.localSongs + model.recent).associateBy { it.key }
-        val heard = history.days.filterKeys { it >= today.minusDays(29) && it <= today }.values
-            .flatMap { it.values }.groupBy { it.song.key }.values
-            .sortedWith(compareByDescending<List<HeardSong>> { songs -> songs.sumOf { it.milliseconds } }
-                .thenByDescending { songs -> songs.maxOf { it.lastHeard } })
-            .filter { songs -> songs.sumOf { it.milliseconds } >= 1_000 }
-            .map { songs -> songs.maxBy { it.lastHeard }.song.let { known[it.key] ?: it } }
-        if (heard.isNotEmpty()) heard.take(3) else {
-            val counts = model.settings.listeningStats()
-            known.values.filter { (counts[it.key]?.plays ?: 0) > 0 }
-                .sortedWith(compareByDescending<Song> { counts[it.key]?.plays ?: 0 }
-                    .thenByDescending { counts[it.key]?.lastPlayed ?: 0 }).take(3)
-        }
-    }
+    val days = remember(history, today) { history.lastDays(today, 7) }
     Crossfade(targetState = hasDuration, label = "listening-summary") { recorded ->
-        if (recorded) Column(Modifier.clip(RoundedCornerShape(28.dp)), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Surface(shape = RoundedCornerShape(4.dp), color = scheme.surfaceContainerHigh,
-                contentColor = scheme.onSurface) {
-                Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        ListeningHeadphoneBadge()
-                        Spacer(Modifier.width(12.dp))
-                        Column {
-                            Text("听歌概况", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                            Text("今天", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
-                        }
-                    }
-                    Text(listeningDurationLabel(todayMs), style = MaterialTheme.typography.headlineLarge,
-                        color = scheme.primary, fontWeight = FontWeight.Bold)
-                }
+        if (recorded) Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            OverviewCard(todayMs, todayCount, weekMs, weekMs / today.dayOfWeek.value.coerceAtLeast(1))
+            HabitCard(days, history.activeDays(today, 7), history.streak(today)) {
+                close()
+                model.page = Page.Stats
             }
-            Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                ListeningMetric("本周时长", listeningDurationLabel(weekMs), scheme.secondaryContainer,
-                    scheme.onSecondaryContainer, Modifier.weight(1f).fillMaxHeight())
-                ListeningMetric("今日听过", "${todaySongs.count { it.milliseconds >= 1_000 }} 首", scheme.tertiaryContainer,
-                    scheme.onTertiaryContainer, Modifier.weight(1f).fillMaxHeight())
-            }
-        } else Surface(shape = RoundedCornerShape(28.dp), color = scheme.surfaceContainerHigh,
-            contentColor = scheme.onSurface) {
-            Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                ListeningHeadphoneBadge()
-                Text("从第一首歌开始",
-                    style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                Button(onClick = { close(); model.page = if (model.profile == null) Page.Local else Page.Home },
-                    shapes = ButtonDefaults.shapes()) {
-                    Icon(Icons.Rounded.PlayArrow, null, Modifier.size(20.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("去听歌")
-                }
-            }
-        }
-    }
-    if (frequent.isNotEmpty()) {
-        Surface(shape = RoundedCornerShape(28.dp), color = scheme.surfaceContainerHigh) {
-        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("最近常听", Modifier.padding(start = 8.dp, top = 8.dp),
-            style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-        Column(verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
-            frequent.forEachIndexed { index, song ->
-                val active = song.key == model.current?.key
-                SegmentedListItem(onClick = { close(); model.play(frequent, index) },
-                    shapes = ListItemDefaults.segmentedShapes(index, frequent.size).copy(shape = segmentedOuterShape(index, frequent.size)),
-                    colors = ListItemDefaults.segmentedColors(
-                        containerColor = if (active) scheme.primaryContainer else scheme.surfaceContainer,
-                        contentColor = if (active) scheme.onPrimaryContainer else scheme.onSurface,
-                        supportingContentColor = if (active) scheme.onPrimaryContainer else scheme.onSurfaceVariant),
-                    leadingContent = { Artwork(song.cover, Modifier.size(40.dp).clip(RoundedCornerShape(12.dp))) },
-                    supportingContent = { Text(song.artist, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.bodySmall) },
-                    trailingContent = { SongRowStatus(song) }) {
-                    Text(song.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                }
-            }
-        }
-        }
+        } else EmptyCard {
+            close()
+            model.page = if (model.profile == null) Page.Local else Page.Home
         }
     }
 }
 
 @Composable
-private fun ListeningMetric(title: String, value: String, background: Color, foreground: Color, modifier: Modifier) {
-    Surface(modifier, shape = RoundedCornerShape(4.dp), color = background, contentColor = foreground) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(title, style = MaterialTheme.typography.labelLarge)
-            Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+private fun OverviewCard(todayMs: Long, todayCount: Int, weekMs: Long, dailyMs: Long) {
+    val scheme = MaterialTheme.colorScheme
+    Surface(shape = RoundedCornerShape(28.dp), color = scheme.surfaceContainerHigh, contentColor = scheme.onSurface) {
+        Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                ListeningBadge()
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Text("听歌概况", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text("今天 · $todayCount 首", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+                }
+            }
+            Text(listeningDurationLabel(todayMs), style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
+            Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+                ListeningStat("本周", listeningDurationLabel(weekMs), Modifier.weight(1f))
+                ListeningStat("日均", listeningDurationLabel(dailyMs), Modifier.weight(1f))
+            }
         }
     }
 }
 
 @Composable
-private fun ListeningHeadphoneBadge() {
+private fun HabitCard(days: List<ListeningDay>, activeDays: Int, streak: Int, onClick: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    Surface(onClick = onClick, shape = RoundedCornerShape(28.dp), color = scheme.surfaceContainerHigh,
+        contentColor = scheme.onSurface) {
+        Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("听歌习惯", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text(habitLabel(activeDays, streak), style = MaterialTheme.typography.bodySmall,
+                        color = scheme.onSurfaceVariant)
+                }
+                Icon(Icons.Rounded.ChevronRight, "听歌统计", tint = scheme.onSurfaceVariant)
+            }
+            ListeningTimeline(days)
+        }
+    }
+}
+
+private fun habitLabel(activeDays: Int, streak: Int): String =
+    if (streak >= 2) "这周 $activeDays 天在听 · 连续 $streak 天" else "这周 $activeDays 天在听"
+
+@Composable
+private fun EmptyCard(onListen: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    Surface(shape = RoundedCornerShape(28.dp), color = scheme.surfaceContainerHigh, contentColor = scheme.onSurface) {
+        Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            ListeningBadge()
+            Text("从第一首歌开始", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text("播放过的时长会按天记录在这里", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+            Button(onClick = onListen, shapes = ButtonDefaults.shapes()) {
+                Icon(Icons.Rounded.PlayArrow, null, Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("去听歌")
+            }
+        }
+    }
+}
+
+@Composable
+private fun ListeningStat(label: String, value: String, modifier: Modifier = Modifier) {
+    val scheme = MaterialTheme.colorScheme
+    Column(modifier) {
+        Text(label, style = MaterialTheme.typography.labelMedium, color = scheme.onSurfaceVariant)
+        Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
+private fun ListeningTimeline(days: List<ListeningDay>) {
+    val scheme = MaterialTheme.colorScheme
+    val max = days.maxOfOrNull { it.milliseconds } ?: 0L
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Bottom) {
+        days.forEach { day ->
+            val isToday = day.date == days.last().date
+            val fraction = if (max > 0) (day.milliseconds.toFloat() / max).coerceIn(0f, 1f) else 0f
+            Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(Modifier.fillMaxWidth().height((56.dp * fraction).coerceAtLeast(6.dp)).clip(CircleShape)
+                    .background(if (isToday) scheme.primary else scheme.primary.copy(alpha = .32f)))
+                Spacer(Modifier.height(6.dp))
+                Text(if (isToday) "今" else weekdayLabel(day.date), style = MaterialTheme.typography.labelSmall,
+                    color = if (isToday) scheme.primary else scheme.onSurfaceVariant,
+                    fontWeight = if (isToday) FontWeight.Bold else FontWeight.Normal)
+            }
+        }
+    }
+}
+
+private fun weekdayLabel(date: LocalDate): String = "一二三四五六日"[date.dayOfWeek.value - 1].toString()
+
+@Composable
+private fun ListeningBadge() {
     val scheme = MaterialTheme.colorScheme
     Surface(shape = CircleShape, color = scheme.primaryContainer, contentColor = scheme.onPrimaryContainer) {
-        Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) { Icon(Icons.Rounded.Headphones, null, Modifier.size(24.dp)) }
+        Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+            Icon(Icons.Rounded.Headphones, null, Modifier.size(20.dp))
+        }
     }
 }

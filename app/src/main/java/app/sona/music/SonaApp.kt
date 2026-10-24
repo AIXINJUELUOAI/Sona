@@ -59,6 +59,7 @@ fun SonaApp(model: MusicViewModel, dark: Boolean, systemScheme: ColorScheme) {
             Page.Songs -> SongsScreen(model, model::back)
             Page.Daily -> SongsScreen(model, model::back, dailyRecommendations = true)
             Page.Local -> LocalMusicScreen(model, preview)
+            Page.Stats -> ListeningStatsScreen(model, model::back)
         }
     }
     LaunchedEffect(model.error) {
@@ -203,6 +204,13 @@ fun SonaApp(model: MusicViewModel, dark: Boolean, systemScheme: ColorScheme) {
             .padding(start = 16.dp, end = 16.dp, bottom = if (model.current != null && !expanded) 88.dp else 16.dp))
     }
     if (model.queueVisible) MaterialTheme(colorScheme = songScheme) { QueueSheet(model) }
+    if (model.accountVisible) AccountSheet(model,
+        onDismiss = { model.accountVisible = false },
+        onLogin = {
+            model.accountVisible = false
+            model.page = Page.Login
+            scope.launch { drawer.close() }
+        })
     if (model.outputVisible) MaterialTheme(colorScheme = songScheme) {
         MediaOutputSheet(playing = model.playing, onPlay = model::togglePlay,
             onPrevious = model::previous, onNext = model::next,

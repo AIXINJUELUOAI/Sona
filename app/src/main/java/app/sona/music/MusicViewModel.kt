@@ -30,9 +30,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.time.LocalDate
 
-enum class Page { Home, Search, Library, Login, Songs, Local, Daily }
+enum class Page { Home, Search, Library, Login, Songs, Local, Daily, Stats }
 
 @UnstableApi
 class MusicViewModel(app: Application) : AndroidViewModel(app) {
@@ -73,6 +74,15 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         PlayerStyleMode.TapToSwitch -> lastBoldPlayer
     }
     var profile by mutableStateOf<Profile?>(null)
+        private set
+    var accountVisible by mutableStateOf(false)
+    var localName by mutableStateOf(settings.localName)
+        private set
+    var localAvatar by mutableStateOf(settings.localAvatar)
+        private set
+    var localDaily by mutableStateOf(emptyList<Song>())
+        private set
+    var localCollections by mutableStateOf(emptyList<LocalCollection>())
         private set
     var lists by mutableStateOf(emptyList<MusicList>())
         private set
@@ -231,6 +241,7 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         }
         refreshLocalMusic()
         rebuildRecommendations()
+        rebuildLocalHome()
         refresh()
     }
     private fun syncPlayer() {
@@ -271,6 +282,7 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         if (!localPermission) {
             localJob?.cancel(); localSongs = emptyList(); localLoading = false; localError = null; localRefreshMessage = null
             rebuildRecommendations()
+            rebuildLocalHome()
             return
         }
         if (localJob?.isActive == true) {
@@ -308,12 +320,14 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 localFavorites = settings.localFavorites()
                 rebuildRecommendations()
+                rebuildLocalHome()
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
                 localPermission = canReadLocalMusic(getApplication())
                 if (!localPermission) localSongs = emptyList()
                 localError = "扫描未完成，请检查音乐权限后重试"
                 rebuildRecommendations()
+                rebuildLocalHome()
             } finally { localLoading = false }
         }
     }
@@ -328,6 +342,30 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         rebuildRecommendations()
         openSongs("为你混合推荐", recommendations)
     }
+    // Logged-out home: a daily mix and playlists derived only from the device library.
+    private fun rebuildLocalHome() {
+        if (localSongs.isEmpty()) {
+            localDaily = emptyList()
+            localCollections = emptyList()
+            settings.localDailyDate = ""
+            settings.localDailyKeys = emptyList()
+            return
+        }
+        val stats = settings.listeningStats()
+        val now = System.currentTimeMillis()
+        val today = LocalDate.now().toString()
+        val byKey = localSongs.associateBy { it.key }
+        val saved = if (settings.localDailyDate == today) settings.localDailyKeys else emptyList()
+        val restored = saved.mapNotNull(byKey::get)
+        localDaily = if (saved.isNotEmpty() && restored.size == saved.size) restored
+            else buildLocalDaily(localSongs, stats, localFavorites, now).also { mix ->
+                settings.localDailyDate = today
+                settings.localDailyKeys = mix.map { it.key }
+            }
+        localCollections = buildLocalCollections(localSongs, stats, localFavorites, now)
+    }
+    fun openLocalDaily() = openSongs("今日推荐", localDaily)
+    fun openLocalCollection(collection: LocalCollection) = openSongs(collection.title, collection.songs)
     fun openLocalFavorites() = openSongs("本地收藏", localSongs.filter(::isLiked))
     fun refresh() {
         refreshLocalMusic()
@@ -530,6 +568,7 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         if (song.isLocal) {
             settings.setLocalFavorite(song, !isLiked(song)); localFavorites = settings.localFavorites()
             rebuildRecommendations()
+            rebuildLocalHome()
             return
         }
         if (profile == null) { playerExpanded = false; page = Page.Login; return }
@@ -656,7 +695,40 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         settings.clearSession(); profile = null; lists = emptyList(); daily = emptyList(); dailyDate = null; liked = emptySet()
         android.webkit.CookieManager.getInstance().removeAllCookies(null)
         if (current?.isLocal != true) { controller?.stop(); controller?.clearMediaItems() }
-        rebuildRecommendations(); page = Page.Home
+        rebuildRecommendations(); page = Page.Home; accountVisible = false
+    }
+    fun saveLocalName(value: String) {
+        localName = value.trim().take(24)
+        settings.localName = localName
+    }
+    // Copies the picked photo into app storage: a content:// grant would not survive a restart.
+    fun saveLocalAvatar(uri: Uri) {
+        viewModelScope.launch {
+            try {
+                val app = getApplication<Application>()
+                val path = withContext(Dispatchers.IO) {
+                    val target = File(app.filesDir, "profile-avatar-${System.currentTimeMillis()}")
+                    val previous = settings.localAvatar
+                    app.contentResolver.openInputStream(uri)?.use { input ->
+                        target.outputStream().use { output -> input.copyTo(output) }
+                    } ?: throw IllegalStateException("无法读取所选图片")
+                    if (previous.isNotBlank()) File(previous).takeIf { it.parentFile == app.filesDir }?.delete()
+                    target.absolutePath
+                }
+                localAvatar = path
+                settings.localAvatar = path
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { error = "头像读取失败，请换一张图片" }
+        }
+    }
+    fun refreshProfile() {
+        if (settings.cookie.isBlank()) return
+        viewModelScope.launch {
+            try {
+                profile = withContext(Dispatchers.IO) { api.profile() }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { error = "资料刷新失败，请检查网络" }
+        }
     }
     fun setAppearance(value: String) { theme = value; settings.theme = value }
     fun setPlayerStyle(value: PlayerStyleMode) {
