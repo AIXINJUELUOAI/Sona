@@ -1,0 +1,35 @@
+# Gradle / Kotlin build state
+.gradle/
+.kotlin/
+**/build/
+
+# IDE
+.idea/
+*.iml
+
+# Machine-local configuration (SDK path)
+local.properties
+
+# Project-local emulator data and AVD images
+.local/
+
+# Signing material: never commit these
+keys/
+*.jks
+*.keystore
+sona-signing.properties
+
+# Machine-specific packaging + key tooling
+tools/local-release.ps1
+
+# Local snapshots, generated deliveries, scratch work
+backups/
+outputs/
+review/
+
+# Gradle logs, JVM crash dumps, replay recordings
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
