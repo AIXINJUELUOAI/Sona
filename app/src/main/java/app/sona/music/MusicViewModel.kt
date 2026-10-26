@@ -10,12 +10,14 @@ import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.C
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -61,12 +63,23 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         currentPage = history.removeLastOrNull() ?: Page.Home
     }
     var playerExpanded by mutableStateOf(false)
+    var deskMode by mutableStateOf(false)
+    var deskBold by mutableStateOf(false)
+    var deskControlsCollapsed by mutableStateOf(false)
+    var deskLyricsOpen by mutableStateOf(false)
     var lyricsVisible by mutableStateOf(false)
     var queueVisible by mutableStateOf(false)
     var outputVisible by mutableStateOf(false)
     var theme by mutableStateOf(settings.theme)
     var playerStyleMode by mutableStateOf(settings.playerStyleMode)
         private set
+    var coverShapeMode by mutableStateOf(settings.coverShapeMode)
+        private set
+    var coverShapeIndex by mutableIntStateOf(1)
+        private set
+    var coverFixedShapeIndex by mutableIntStateOf(settings.coverFixedShape)
+        private set
+    private var lastCoverShapeIndex = 1
     private var lastBoldPlayer by mutableStateOf(settings.lastBoldPlayer)
     val boldPlayer: Boolean get() = when (playerStyleMode) {
         PlayerStyleMode.Default -> false
@@ -149,13 +162,20 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var songList by mutableStateOf(emptyList<Song>())
         private set
+    var songListSource by mutableStateOf("")
+        private set
+    val dailySource: String get() = "daily:${profile?.id}:$dailyDate"
+    val localDailySource: String get() = "local-daily:${settings.localDailyDate}"
+    val searchQueueSource: String get() = "search:${searchSource.name}:$submittedQuery"
     var listHasMore by mutableStateOf(false)
         private set
     var listLoading by mutableStateOf(false)
         private set
     private var openedList: MusicList? = null
-    val songListIsCloudOnly: Boolean get() = openedList != null || openedLikedIds != null
-    private var openedLikedIds: List<Long>? = null
+    val songListIsCloudOnly: Boolean get() = openedList != null
+    private var favoritesOpen = false
+    private var favoriteCloudSongs = emptyList<Song>()
+    private var favoriteRowsJob: Job? = null
     private var listGeneration = 0
     private var listJob: Job? = null
     private var searchJob: Job? = null
@@ -209,11 +229,31 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
     private var lyricGeneration = 0
     private val localLyricsReader = LocalLyricsReader(app, settings)
     private var controller: MediaController? = null
+    private var uiActive = false
+    private var positionJob: Job? = null
+    fun setUiActive(active: Boolean) {
+        uiActive = active
+        updatePositionPolling()
+    }
+    private fun updatePositionPolling() {
+        if (!uiActive || controller?.isPlaying != true) {
+            positionJob?.cancel()
+            positionJob = null
+            return
+        }
+        if (positionJob?.isActive == true) return
+        positionJob = viewModelScope.launch {
+            while (true) {
+                controller?.let { position = it.currentPosition.coerceAtLeast(0) }
+                delay(if (playerExpanded) 250 else 1000)
+            }
+        }
+    }
     private var radioActive = false
     private var radioJob: Job? = null
     private val controllerFuture = MediaController.Builder(app, SessionToken(app, ComponentName(app, PlaybackService::class.java))).buildAsync()
     private val listener = object : Player.Listener {
-        override fun onEvents(player: Player, events: Player.Events) { syncPlayer() }
+        override fun onEvents(player: Player, events: Player.Events) { syncPlayer(events) }
         override fun onPlayerError(exception: PlaybackException) {
             val messages = generateSequence<Throwable>(exception) { it.cause }.mapNotNull { it.message }.toList()
             if (current?.isLocal == true) {
@@ -233,18 +273,12 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
                 controller = it; it.addListener(listener); connected = true; syncPlayer()
             }.onFailure { android.util.Log.e("SonaPlayback", "Media controller connection failed", it); error = "播放器启动失败，请重新打开 Sona" }
         }, ContextCompat.getMainExecutor(app))
-        viewModelScope.launch {
-            while (true) {
-                controller?.let { position = it.currentPosition.coerceAtLeast(0); duration = it.duration.takeIf { d -> d != C.TIME_UNSET }?.coerceAtLeast(0) ?: current?.duration ?: 0 }
-                delay(if (playerExpanded) 250 else 1000)
-            }
-        }
         refreshLocalMusic()
         rebuildRecommendations()
         rebuildLocalHome()
         refresh()
     }
-    private fun syncPlayer() {
+    private fun syncPlayer(events: Player.Events? = null) {
         val player = controller ?: return
         playing = player.playWhenReady && player.playbackState != Player.STATE_ENDED
         buffering = player.playbackState == Player.STATE_BUFFERING
@@ -253,14 +287,17 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
             (player.shuffleModeEnabled && player.mediaItemCount > 1 && player.isCommandAvailable(Player.COMMAND_SEEK_TO_MEDIA_ITEM))
         shuffled = player.shuffleModeEnabled
         repeat = player.repeatMode
-        val timeline = player.currentTimeline
-        queueMediaIndices = if (timeline.windowCount == player.mediaItemCount) {
-            queueOrder(player.mediaItemCount, timeline.getFirstWindowIndex(shuffled)) {
-                timeline.getNextWindowIndex(it, Player.REPEAT_MODE_OFF, shuffled)
-            }
-        } else (0 until player.mediaItemCount).toList()
+        if (events == null || events.containsAny(Player.EVENT_TIMELINE_CHANGED, Player.EVENT_MEDIA_METADATA_CHANGED,
+                Player.EVENT_SHUFFLE_MODE_ENABLED_CHANGED, Player.EVENT_PLAYLIST_METADATA_CHANGED)) {
+            val timeline = player.currentTimeline
+            queueMediaIndices = if (timeline.windowCount == player.mediaItemCount) {
+                queueOrder(player.mediaItemCount, timeline.getFirstWindowIndex(shuffled)) {
+                    timeline.getNextWindowIndex(it, Player.REPEAT_MODE_OFF, shuffled)
+                }
+            } else (0 until player.mediaItemCount).toList()
+            queue = queueMediaIndices.map { songFromItem(player.getMediaItemAt(it)) }
+        }
         queueIndex = queueMediaIndices.indexOf(player.currentMediaItemIndex)
-        queue = queueMediaIndices.map { songFromItem(player.getMediaItemAt(it)) }
         if (radioActive && queue.size - queueIndex <= 2 && radioJob?.isActive != true) appendRadio()
         val next = player.currentMediaItem?.let(::songFromItem)
         position = player.currentPosition.coerceAtLeast(0)
@@ -275,6 +312,45 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
                 loadLyrics(song.id)
             }
         } else current = next
+        if (next?.key != coverShapeKey) {
+            coverShapeKey = next?.key
+            updateCoverShape()
+        }
+        prefetchUpcomingCovers()
+        updatePositionPolling()
+    }
+    private var coverShapeKey: String? = null
+    private val prefetchedCovers = HashSet<String>()
+
+    /** fixed / perSong / cycle; per-song keeps each track's silhouette but never repeats the previous one. */
+    private fun updateCoverShape() {
+        val count = coverPolygons.size
+        val key = current?.key
+        val base = if (key.isNullOrBlank()) 1 else (key.hashCode() and 0x7fffffff) % count
+        val index = when (coverShapeMode) {
+            "fixed" -> coverFixedShapeIndex.coerceIn(0, count - 1)
+            "cycle" -> (lastCoverShapeIndex + 1) % count
+            else -> if (base == lastCoverShapeIndex) (base + 1) % count else base
+        }
+        lastCoverShapeIndex = index
+        coverShapeIndex = index
+    }
+    fun selectFixedCoverShape(index: Int) {
+        coverFixedShapeIndex = index.coerceIn(0, coverPolygons.size - 1)
+        settings.coverFixedShape = coverFixedShapeIndex
+        selectCoverShapeMode("fixed")
+    }
+    fun selectCoverShapeMode(value: String) {
+        coverShapeMode = value
+        settings.coverShapeMode = value
+        lastCoverShapeIndex = -1
+        updateCoverShape()
+    }
+    private fun prefetchUpcomingCovers() {
+        if (queue.isEmpty()) return
+        val pending = queue.drop(queueIndex + 1).take(10).map { it.cover }
+            .filter { it.isNotBlank() && prefetchedCovers.add(it) }
+        if (pending.isNotEmpty()) prefetchArtwork(getApplication<Application>(), pending)
     }
     fun forceRefreshLocalMusic() = refreshLocalMusic(force = true)
     fun refreshLocalMusic(force: Boolean = false) {
@@ -340,10 +416,11 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
     fun openRecommendations() {
         recent = settings.recentSongs()
         rebuildRecommendations()
-        openSongs("为你混合推荐", recommendations)
+        openSongs("为你混合推荐", recommendations, "recommendations")
     }
     // Logged-out home: a daily mix and playlists derived only from the device library.
     private fun rebuildLocalHome() {
+        refreshFavoriteRows()
         if (localSongs.isEmpty()) {
             localDaily = emptyList()
             localCollections = emptyList()
@@ -364,9 +441,9 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
             }
         localCollections = buildLocalCollections(localSongs, stats, localFavorites, now)
     }
-    fun openLocalDaily() = openSongs("今日推荐", localDaily)
-    fun openLocalCollection(collection: LocalCollection) = openSongs(collection.title, collection.songs)
-    fun openLocalFavorites() = openSongs("本地收藏", localSongs.filter(::isLiked))
+    fun openLocalDaily() = openSongs("今日推荐", localDaily, localDailySource)
+    fun openLocalCollection(collection: LocalCollection) = openSongs(collection.title, collection.songs, "local-collection:${collection.key}")
+    fun openLocalFavorites() = openSongs("本地收藏", localSongs.filter(::isLiked), "local-favorites")
     fun refresh() {
         refreshLocalMusic()
         if (busy) return
@@ -393,7 +470,10 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
                 } else { lists = emptyList(); daily = emptyList(); dailyDate = null; liked = emptySet() }
                 if (failures.isNotEmpty()) error = "部分内容未刷新：${failures.first()}"
             }
-            finally { rebuildRecommendations(); busy = false }
+            finally {
+                rebuildRecommendations(); busy = false
+                if (favoritesOpen) loadFavoriteSongs(refreshIds = false)
+            }
         }
     }
     fun updateQuery(text: String) {
@@ -438,20 +518,58 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun clearSearches() { settings.clearSearches(); searches = emptyList() }
     fun openList(list: MusicList) {
-        listGeneration++
-        listJob?.cancel(); listLoading = false; openedLikedIds = null; openedList = list; songListTitle = list.name; songList = emptyList(); page = Page.Songs
+        openSongs(list.name, emptyList(), "playlist:${list.id}")
+        openedList = list
         loadMoreList()
     }
     fun openLikedSongs() {
-        if (profile == null) { page = Page.Login; return }
-        openSongs("我喜欢的音乐", emptyList())
-        openedLikedIds = liked.toList()
-        loadMoreList()
+        openSongs("我喜欢的音乐", localSongs.filter(::isLiked), "favorites:${profile?.id ?: 0}")
+        favoritesOpen = true
+        loadFavoriteSongs()
+    }
+    private fun refreshFavoriteRows() {
+        if (!favoritesOpen) return
+        favoriteRowsJob?.cancel()
+        val generation = listGeneration
+        val songs = (localSongs.filter(::isLiked) +
+            if (profile != null) favoriteCloudSongs.filter { it.id in liked } else emptyList()).distinctBy { it.key }
+        favoriteRowsJob = viewModelScope.launch {
+            val ordered = withContext(Dispatchers.Default) { orderLocalSongs(songs, LocalSongSort.Title, false).songs }
+            if (favoritesOpen && generation == listGeneration) songList = ordered
+        }
+    }
+    private fun loadFavoriteSongs(refreshIds: Boolean = true) {
+        listJob?.cancel()
+        val generation = ++listGeneration
+        val user = profile
+        listLoading = user != null
+        listHasMore = false
+        refreshFavoriteRows()
+        if (user == null) return
+        listJob = viewModelScope.launch {
+            try {
+                val ids = if (refreshIds) withContext(Dispatchers.IO) { api.liked(user.id) } else liked
+                if (generation != listGeneration || profile?.id != user.id) return@launch
+                liked = ids
+                favoriteCloudSongs = favoriteCloudSongs.filter { it.id in ids }
+                val known = favoriteCloudSongs.map { it.id }.toSet()
+                for (batch in (ids - known).toList().chunked(100)) {
+                    val tracks = withContext(Dispatchers.IO) { api.songDetails(batch) }
+                    if (generation != listGeneration || profile?.id != user.id) return@launch
+                    favoriteCloudSongs = (favoriteCloudSongs + tracks).distinctBy { it.key }
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { if (generation == listGeneration) error = e.message ?: "网易云收藏加载失败" }
+            finally {
+                if (generation == listGeneration) {
+                    listLoading = false
+                    refreshFavoriteRows()
+                }
+            }
+        }
     }
     fun loadMoreList() {
-        val list = openedList
-        val likedIds = openedLikedIds
-        if (list == null && likedIds == null) return
+        val list = openedList ?: return
         if (listLoading) return
         val offset = songList.size
         val generation = listGeneration
@@ -459,47 +577,62 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         listJob = viewModelScope.launch {
             try {
                 val tracks = withContext(Dispatchers.IO) {
-                    if (likedIds != null) {
-                        val pageIds = likedIds.drop(offset).take(100)
-                        if (pageIds.isEmpty()) emptyList() else {
-                            val details = api.songDetails(pageIds).associateBy { it.id }
-                            pageIds.map { details[it] ?: Song(it, "暂不可用的歌曲", "未知歌手") }
-                        }
-                    } else api.tracks(list!!.id, offset)
+                    api.tracks(list.id, offset)
                 }
                 if (generation != listGeneration) return@launch
                 songList = songList + tracks
-                listHasMore = if (likedIds != null) songList.size < likedIds.size else tracks.size == 100
+                listHasMore = tracks.size == 100
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { if (generation == listGeneration) { error = e.message; listHasMore = true } }
             finally { if (generation == listGeneration) listLoading = false }
         }
     }
-    fun openSongs(title: String, songs: List<Song>) {
+    fun openSongs(title: String, songs: List<Song>, source: String = "songs:$title") {
         listGeneration++
-        listJob?.cancel(); listLoading = false; openedList = null; openedLikedIds = null; songListTitle = title; songList = songs; listHasMore = false; page = Page.Songs
+        listJob?.cancel(); favoriteRowsJob?.cancel(); listLoading = false; openedList = null; favoritesOpen = false
+        songListSource = source; songListTitle = title; songList = songs; listHasMore = false; page = Page.Songs
     }
     fun openRecent() {
         recent = settings.recentSongs()
         // Keep this visit's row order stable while the underlying history keeps updating.
-        openSongs("最近播放", recent)
+        openSongs("最近播放", recent, "recent")
     }
     fun play(songs: List<Song>, index: Int = 0, radio: Boolean = false,
-        origin: PlaybackOrigin = PlaybackOrigin.SongList) {
+        origin: PlaybackOrigin = PlaybackOrigin.SongList, source: String = "", restartQueue: Boolean = false) {
         val player = controller ?: run { error = "播放器正在准备，请稍候"; return }
         if (songs.isEmpty()) return
         val targetIndex = index.coerceIn(songs.indices)
         if (songs[targetIndex].isLocal && !canReadLocalMusic(getApplication())) {
             refreshLocalMusic(); error = "请先在本地音乐页面允许读取音频"; return
         }
-        // Compare the underlying playlist, not its shuffled display order. Seeking preserves
-        // Media3's existing shuffle traversal and avoids a PLAYLIST_CHANGED transition.
+        val targetKey = songs[targetIndex].key
+        val queueSource = player.playlistMetadata.extras?.getString(PlaybackService.QUEUE_SOURCE).orEmpty()
+        val sameSource = source.isNotEmpty() && source == queueSource
         val sameQueue = radioActive == radio && player.mediaItemCount == songs.size &&
             songs.indices.all { player.getMediaItemAt(it).mediaId == songs[it].key }
-        if (sameQueue) {
-            if (player.currentMediaItemIndex != targetIndex || player.playbackState == Player.STATE_ENDED) {
-                player.seekToDefaultPosition(targetIndex)
+        if (!restartQueue && (sameSource || (sameQueue && (source.isEmpty() || queueSource.isEmpty()))) &&
+            player.mediaItemCount > 0 && radioActive == radio) {
+            if (source.isNotEmpty() && queueSource.isEmpty()) player.playlistMetadata = MediaMetadata.Builder().setExtras(Bundle().apply {
+                putString(PlaybackService.QUEUE_SOURCE, source)
+            }).build()
+            // A source can be re-sorted or paginated without replacing its active queue.
+            val queued = (0 until player.mediaItemCount).associateBy { player.getMediaItemAt(it).mediaId }
+            val missing = songs.distinctBy { it.key }.filter { it.key !in queued }
+            if (missing.isNotEmpty()) {
+                val count = player.mediaItemCount
+                val timeline = player.currentTimeline
+                val order = queueOrder(count, timeline.getFirstWindowIndex(true)) {
+                    timeline.getNextWindowIndex(it, Player.REPEAT_MODE_OFF, true)
+                } + (count until count + missing.size).shuffled()
+                player.addMediaItems(missing.map { it.mediaItem() })
+                if (player.shuffleModeEnabled) player.sendCustomCommand(
+                    SessionCommand(PlaybackService.KEEP_SHUFFLE_ORDER, Bundle.EMPTY), Bundle().apply {
+                        putString(PlaybackService.QUEUE_SOURCE, player.playlistMetadata.extras?.getString(PlaybackService.QUEUE_SOURCE).orEmpty())
+                        putIntArray("order", order.toIntArray())
+                    })
             }
+            val mediaIndex = (0 until player.mediaItemCount).firstOrNull { player.getMediaItemAt(it).mediaId == targetKey } ?: return
+            if (player.currentMediaItemIndex != mediaIndex || player.playbackState == Player.STATE_ENDED) player.seekToDefaultPosition(mediaIndex)
             if (player.playbackState == Player.STATE_IDLE) player.prepare()
             anchorShuffle(origin)
             player.play()
@@ -507,7 +640,11 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         }
         radioJob?.cancel(); radioActive = radio
         val localByKey = localSongs.associateBy { it.key }
+        player.playlistMetadata = MediaMetadata.Builder().setExtras(Bundle().apply {
+            putString(PlaybackService.QUEUE_SOURCE, source)
+        }).build()
         player.setMediaItems(songs.map { (if (it.isLocal) localByKey[it.key] ?: it else it).mediaItem() }, targetIndex, 0)
+        if (player.shuffleModeEnabled) player.repeatMode = Player.REPEAT_MODE_ALL
         anchorShuffle(origin)
         player.prepare(); player.play()
     }
@@ -549,7 +686,12 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
     }, PlaybackOrigin.SongList)
     private fun anchorShuffle(origin: PlaybackOrigin) {
         if (origin == PlaybackOrigin.OutsideList) {
-            controller?.sendCustomCommand(SessionCommand(PlaybackService.ANCHOR_SHUFFLE, Bundle.EMPTY), Bundle.EMPTY)
+            controller?.let { player ->
+                player.sendCustomCommand(SessionCommand(PlaybackService.ANCHOR_SHUFFLE, Bundle.EMPTY), Bundle().apply {
+                    putString(PlaybackService.QUEUE_SOURCE, player.playlistMetadata.extras?.getString(PlaybackService.QUEUE_SOURCE).orEmpty())
+                    putString("song", player.currentMediaItem?.mediaId)
+                })
+            }
         }
     }
     fun setPlaybackMode(mode: PlaybackMode, origin: PlaybackOrigin) {
@@ -574,7 +716,12 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         if (profile == null) { playerExpanded = false; page = Page.Login; return }
         val value = song.id !in liked
         viewModelScope.launch {
-            try { withContext(Dispatchers.IO) { api.like(song.id, value) }; liked = if (value) liked + song.id else liked - song.id; rebuildRecommendations() }
+            try {
+                withContext(Dispatchers.IO) { api.like(song.id, value) }
+                liked = if (value) liked + song.id else liked - song.id
+                rebuildRecommendations()
+                if (favoritesOpen) loadFavoriteSongs(refreshIds = false)
+            }
             catch (e: CancellationException) { throw e }
             catch (e: Exception) { error = e.message }
         }
@@ -582,7 +729,8 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
     fun playRadio() {
         if (profile == null) { page = Page.Login; return }
         viewModelScope.launch {
-            try { play(withContext(Dispatchers.IO) { api.radio() }, radio = true, origin = PlaybackOrigin.OutsideList); playerExpanded = true }
+            try { play(withContext(Dispatchers.IO) { api.radio() }, radio = true, origin = PlaybackOrigin.OutsideList,
+                source = "radio:${profile?.id}", restartQueue = true); playerExpanded = true }
             catch (e: CancellationException) { throw e }
             catch (e: Exception) { error = e.message }
         }
@@ -602,7 +750,7 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         if (daily.isEmpty() || dailyDate != LocalDate.now()) refresh()
     }
     fun playDaily() {
-        if (daily.isNotEmpty()) { play(daily, origin = PlaybackOrigin.OutsideList); playerExpanded = true } else openDaily()
+        if (daily.isNotEmpty()) { play(daily, origin = PlaybackOrigin.OutsideList, source = dailySource, restartQueue = true); playerExpanded = true } else openDaily()
     }
     fun loadLyrics(id: Long) {
         val song = current?.takeIf { it.id == id } ?: return
@@ -692,6 +840,8 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
     fun stopQrLogin() { qrJob?.cancel() }
     fun logout() {
         radioActive = false; radioJob?.cancel()
+        listGeneration++; listJob?.cancel(); favoriteRowsJob?.cancel(); listLoading = false
+        favoritesOpen = false; favoriteCloudSongs = emptyList()
         settings.clearSession(); profile = null; lists = emptyList(); daily = emptyList(); dailyDate = null; liked = emptySet()
         android.webkit.CookieManager.getInstance().removeAllCookies(null)
         if (current?.isLocal != true) { controller?.stop(); controller?.clearMediaItems() }

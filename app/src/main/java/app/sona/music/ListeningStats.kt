@@ -4,7 +4,7 @@ import java.time.LocalDate
 
 internal data class ListeningDay(val date: LocalDate, val milliseconds: Long)
 
-internal data class HeardEntry(val song: Song, val milliseconds: Long)
+internal data class HeardEntry(val song: Song, val milliseconds: Long, val plays: Int = 0)
 
 internal fun ListeningHistoryState.millisecondsOn(date: LocalDate): Long =
     days[date].orEmpty().values.sumOf { it.milliseconds }
@@ -34,14 +34,14 @@ internal fun ListeningHistoryState.streak(end: LocalDate): Int {
     return streak
 }
 
-/** Most heard songs over the trailing window, ranked by recorded time. */
+/** Rank by qualified plays; listening time breaks ties. Old duration records stay intact. */
 internal fun ListeningHistoryState.topHeard(end: LocalDate, count: Int, known: Map<String, Song>, limit: Int): List<HeardEntry> =
     days.filterKeys { it >= end.minusDays((count - 1).toLong()) && it <= end }.values
         .flatMap { it.values }.groupBy { it.song.key }.values
         .map { songs ->
             val latest = songs.maxBy { it.lastHeard }.song
-            HeardEntry(known[latest.key] ?: latest, songs.sumOf { it.milliseconds })
+            HeardEntry(known[latest.key] ?: latest, songs.sumOf { it.milliseconds }, songs.sumOf { it.plays })
         }
-        .filter { it.milliseconds >= 1_000 }
-        .sortedByDescending { it.milliseconds }
+        .filter { it.plays > 0 }
+        .sortedWith(compareByDescending<HeardEntry> { it.plays }.thenByDescending { it.milliseconds })
         .take(limit)

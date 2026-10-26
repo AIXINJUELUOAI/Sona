@@ -34,7 +34,7 @@ internal fun buildLocalDaily(songs: List<Song>, stats: Map<String, ListeningStat
     return spreadArtists(result)
 }
 
-/** Local "playlists" for the discovery strip: one row per recognisable pattern in the library. */
+/** Local "playlists" for the discovery strip, led by the artists the library leans on. */
 internal fun buildLocalCollections(songs: List<Song>, stats: Map<String, ListeningStats>, favorites: Set<String>,
     now: Long = System.currentTimeMillis()): List<LocalCollection> {
     if (songs.isEmpty()) return emptyList()
@@ -43,29 +43,30 @@ internal fun buildLocalCollections(songs: List<Song>, stats: Map<String, Listeni
     val favouriteSongs = songs.filter { it.key in favorites }
     if (favouriteSongs.isNotEmpty()) collections += LocalCollection("favorites", "本地收藏", favouriteSongs)
 
-    val recentlyAdded = songs.filter { it.localDateAdded > 0 && now / 1000 - it.localDateAdded <= 30L * 86_400 }
-        .sortedByDescending { it.localDateAdded }
-    if (recentlyAdded.size >= 5) collections += LocalCollection("added", "最近添加", recentlyAdded.take(60))
-
-    val topArtist = songs.filter { it.artist.isNotBlank() && it.artist != "未知歌手" }
+    // Track count ranks an artist before any play history exists; plays take over afterwards.
+    val artists = songs.filter { it.artist.isNotBlank() && it.artist != "未知歌手" }
         .groupBy { it.artist }
-        .mapValues { (_, tracks) -> tracks.sumOf { stats[it.key]?.plays ?: 0 } }
-        .filterValues { it > 0 }
-        .maxByOrNull { it.value }?.key
-    if (topArtist != null) {
-        val tracks = songs.filter { it.artist == topArtist }
-        if (tracks.size >= 3) collections += LocalCollection("artist", "常听歌手 · $topArtist", tracks)
+        .filterValues { it.size >= 3 }
+        .entries
+        .sortedWith(compareByDescending<Map.Entry<String, List<Song>>> { entry ->
+            entry.value.sumOf { stats[it.key]?.plays ?: 0 }
+        }.thenByDescending { it.value.size })
+        .take(5)
+    artists.forEach { (artist, tracks) ->
+        // Most played first; equal scores follow the day's seeded shuffle instead of title order.
+        val ordered = tracks.shuffled(random).sortedByDescending { stats[it.key]?.plays ?: 0 }
+        collections += LocalCollection("artist-$artist", "歌手 · $artist", ordered.take(30))
     }
 
-    val forgotten = songs.filter { song ->
-        val last = stats[song.key]?.lastPlayed ?: 0L
-        last > 0 && now - last > 30L * 86_400_000
+    if (artists.isEmpty()) {
+        // Fragmented library: fall back to recency and the fullest album so the strip is not empty.
+        val recentlyAdded = songs.filter { it.localDateAdded > 0 && now / 1000 - it.localDateAdded <= 30L * 86_400 }
+            .sortedByDescending { it.localDateAdded }
+        if (recentlyAdded.size >= 5) collections += LocalCollection("added", "最近添加", recentlyAdded.take(60))
+        val album = songs.filter { it.album.isNotBlank() }.groupBy { it.album }
+            .entries.maxByOrNull { it.value.size }?.value
+        if (album != null && album.size >= 3) collections += LocalCollection("album", "整张专辑 · ${album.first().album}", album)
     }
-    if (forgotten.size >= 5) collections += LocalCollection("stale", "很久没听", forgotten.shuffled(random).take(50))
-
-    val album = songs.filter { it.album.isNotBlank() }.groupBy { it.album }
-        .entries.maxByOrNull { it.value.size }?.value
-    if (album != null && album.size >= 3) collections += LocalCollection("album", "整张专辑 · ${album.first().album}", album)
     return collections
 }
 

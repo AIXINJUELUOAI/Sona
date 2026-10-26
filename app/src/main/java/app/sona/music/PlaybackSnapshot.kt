@@ -6,7 +6,7 @@ import org.json.JSONObject
 /** A playlist stores stable song identities, never temporary streaming URLs. */
 internal data class PlaybackSnapshot(
     val songs: List<Song>, val index: Int, val position: Long,
-    val shuffle: Boolean, val repeat: Int, val order: List<Int>
+    val shuffle: Boolean, val repeat: Int, val order: List<Int>, val source: String = ""
 ) {
     fun retaining(keep: (Song) -> Boolean): PlaybackSnapshot? {
         val retained = songs.indices.filter { keep(songs[it]) }
@@ -25,7 +25,7 @@ internal data class PlaybackSnapshot(
 
     fun encode(): String = JSONObject().put("version", 1)
         .put("songs", JSONArray(songs.map(::songJson))).put("index", index).put("position", position)
-        .put("shuffle", shuffle).put("repeat", repeat).put("order", JSONArray(order)).toString()
+        .put("shuffle", shuffle).put("repeat", repeat).put("order", JSONArray(order)).put("source", source).toString()
 
     companion object {
         fun decode(value: String): PlaybackSnapshot? = runCatching {
@@ -34,7 +34,7 @@ internal data class PlaybackSnapshot(
             val songs = json.getJSONArray("songs").objects().map(::parseSong)
             val order = json.getJSONArray("order")
             PlaybackSnapshot(songs, json.getInt("index"), json.getLong("position"),
-                json.getBoolean("shuffle"), json.getInt("repeat"), (0 until order.length()).map(order::getInt))
+                json.getBoolean("shuffle"), json.getInt("repeat"), (0 until order.length()).map(order::getInt), json.optString("source"))
                 .retaining { it.isLocal || it.id > 0 }
         }.getOrNull()
     }

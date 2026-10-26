@@ -4,6 +4,7 @@ package app.sona.music
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -18,9 +19,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.util.UnstableApi
 import java.time.LocalDate
@@ -46,7 +49,9 @@ internal fun ListeningStatsScreen(model: MusicViewModel, back: () -> Unit) {
             SummaryCard(if (range == 0) "本周" else "近 30 天", total, total / window, active)
             RangeToggle(range) { range = it }
             ChartCard(days, range == 0)
-            if (top.isNotEmpty()) TopSongsCard(top) { index -> model.play(top.map { it.song }, index) }
+            if (top.isNotEmpty()) TopSongsCard(top) { index ->
+                model.play(top.map { it.song }, index, source = "stats:$today:$window")
+            }
         }
     }
 }
@@ -95,31 +100,8 @@ private fun ChartCard(days: List<ListeningDay>, labelled: Boolean) {
     val scheme = MaterialTheme.colorScheme
     Surface(shape = RoundedCornerShape(28.dp), color = scheme.surfaceContainerHigh, contentColor = scheme.onSurface) {
         Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("每天时长", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold,
-                    modifier = Modifier.weight(1f))
-                Text(if (labelled) "以今天结束的 7 天" else "以今天结束的 30 天",
-                    style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
-            }
-            val max = days.maxOfOrNull { it.milliseconds } ?: 0L
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(if (labelled) 8.dp else 2.dp),
-                verticalAlignment = Alignment.Bottom) {
-                days.forEach { day ->
-                    val isToday = day.date == days.last().date
-                    val fraction = if (max > 0) (day.milliseconds.toFloat() / max).coerceIn(0f, 1f) else 0f
-                    Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Box(Modifier.fillMaxWidth().height((84.dp * fraction).coerceAtLeast(4.dp)).clip(CircleShape)
-                            .background(if (isToday) scheme.primary else scheme.primary.copy(alpha = .32f)))
-                        if (labelled) {
-                            Spacer(Modifier.height(6.dp))
-                            Text(if (isToday) "今" else weekdayLabel(day.date),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (isToday) scheme.primary else scheme.onSurfaceVariant,
-                                fontWeight = if (isToday) FontWeight.Bold else FontWeight.Normal)
-                        }
-                    }
-                }
-            }
+            Text("每天时长", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+            ListeningDayChart(days, labelled)
         }
     }
 }
@@ -144,7 +126,7 @@ private fun TopSongsCard(entries: List<HeardEntry>, onPlay: (Int) -> Unit) {
                         Text(entry.song.artist, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
                     }
-                    Text(listeningDurationLabel(entry.milliseconds), style = MaterialTheme.typography.labelMedium,
+                    Text("${entry.plays} 次", style = MaterialTheme.typography.labelMedium,
                         color = scheme.onSurfaceVariant)
                 }
             }
@@ -153,3 +135,45 @@ private fun TopSongsCard(entries: List<HeardEntry>, onPlay: (Int) -> Unit) {
 }
 
 private fun weekdayLabel(date: LocalDate): String = "一二三四五六日"[date.dayOfWeek.value - 1].toString()
+
+@Composable
+internal fun ListeningDayChart(days: List<ListeningDay>, labelled: Boolean = true, barHeight: Dp = 84.dp) {
+    if (days.isEmpty()) return
+    val scheme = MaterialTheme.colorScheme
+    var selectedDate by rememberSaveable(days.first().date.toString(), days.last().date.toString()) {
+        mutableStateOf(days.last().date.toString())
+    }
+    val selected = days.firstOrNull { it.date.toString() == selectedDate } ?: days.last()
+    val max = days.maxOf { it.milliseconds }
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("${selected.date.monthValue}月${selected.date.dayOfMonth}日 · 周${weekdayLabel(selected.date)}",
+                Modifier.weight(1f), style = MaterialTheme.typography.labelLarge, color = scheme.onSurfaceVariant)
+            Text(listeningDurationLabel(selected.milliseconds), style = MaterialTheme.typography.titleMedium,
+                color = scheme.primary, fontWeight = FontWeight.Bold)
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(if (labelled) 8.dp else 2.dp)) {
+            days.forEach { day ->
+                val chosen = day.date == selected.date
+                val fraction = if (max > 0) (day.milliseconds.toFloat() / max).coerceIn(0f, 1f) else 0f
+                Column(Modifier.weight(1f).clip(RoundedCornerShape(8.dp))
+                    .selectable(selected = chosen, role = Role.RadioButton,
+                        onClick = { selectedDate = day.date.toString() })
+                    .semantics { contentDescription = "${day.date}，${listeningDurationLabel(day.milliseconds)}" },
+                    horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(Modifier.fillMaxWidth().height(barHeight), contentAlignment = Alignment.BottomCenter) {
+                        Box(Modifier.fillMaxWidth().height((barHeight * fraction).coerceAtLeast(4.dp))
+                            .clip(CircleShape).background(if (chosen) scheme.primary else scheme.primary.copy(alpha = .26f)))
+                    }
+                    if (labelled) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(if (day.date == days.last().date) "今" else weekdayLabel(day.date),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (chosen) scheme.primary else scheme.onSurfaceVariant,
+                            fontWeight = if (chosen) FontWeight.Bold else FontWeight.Normal)
+                    }
+                }
+            }
+        }
+    }
+}

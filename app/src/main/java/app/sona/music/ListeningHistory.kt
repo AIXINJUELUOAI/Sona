@@ -9,7 +9,7 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 
-internal data class HeardSong(val song: Song, val milliseconds: Long, val lastHeard: Long)
+internal data class HeardSong(val song: Song, val milliseconds: Long, val lastHeard: Long, val plays: Int = 0)
 internal data class ListeningHistoryState(
     val startedAt: Long,
     val hasLegacyHistory: Boolean,
@@ -39,7 +39,8 @@ internal class ListeningHistory(context: Context, hasLegacyHistory: Boolean) {
                 days[date] = day.getJSONArray("songs").objects().mapNotNull { item ->
                     runCatching {
                         val song = parseSong(item.getJSONObject("song"))
-                        song.key to HeardSong(song, item.getLong("ms").coerceAtLeast(0), item.optLong("last"))
+                        song.key to HeardSong(song, item.getLong("ms").coerceAtLeast(0), item.optLong("last"),
+                            item.optInt("plays").coerceAtLeast(0))
                     }.getOrNull()
                 }.toMap()
             }
@@ -60,7 +61,7 @@ internal class ListeningHistory(context: Context, hasLegacyHistory: Boolean) {
             val end = minOf(endTime, date.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli())
             val entries = days[date].orEmpty().toMutableMap()
             val previous = entries[song.key]
-            entries[song.key] = HeardSong(song, (previous?.milliseconds ?: 0) + end - start, end)
+            entries[song.key] = HeardSong(song, (previous?.milliseconds ?: 0) + end - start, end, previous?.plays ?: 0)
             days[date] = entries
             start = end
         }
@@ -71,11 +72,25 @@ internal class ListeningHistory(context: Context, hasLegacyHistory: Boolean) {
     }
 
     @Synchronized
+    fun recordPlay(song: Song, time: Long) {
+        val date = Instant.ofEpochMilli(time).atZone(ZoneId.systemDefault()).toLocalDate()
+        val days = state.value.days.toMutableMap()
+        val entries = days[date].orEmpty().toMutableMap()
+        val previous = entries[song.key]
+        entries[song.key] = HeardSong(song, previous?.milliseconds ?: 0, time, (previous?.plays ?: 0) + 1)
+        days[date] = entries
+        state.value = state.value.copy(days = days)
+        dirty = true
+        flush()
+    }
+
+    @Synchronized
     fun flush() {
         if (!dirty) return
         val json = JSONArray(state.value.days.map { (date, songs) ->
             JSONObject().put("date", date.toString()).put("songs", JSONArray(songs.values.map {
                 JSONObject().put("song", songJson(it.song)).put("ms", it.milliseconds).put("last", it.lastHeard)
+                    .put("plays", it.plays)
             }))
         })
         prefs.edit().putString("days", json.toString()).apply()

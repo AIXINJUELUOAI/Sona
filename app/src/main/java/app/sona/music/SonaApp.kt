@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
+import androidx.compose.material3.carousel.rememberCarouselState
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
@@ -23,6 +24,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -45,6 +47,11 @@ fun SonaApp(model: MusicViewModel, dark: Boolean, systemScheme: ColorScheme) {
     val songScheme = rememberCoverScheme(model.current?.cover, dark, systemScheme)
     val snackbar = remember { SnackbarHostState() }
     val homeScroll = rememberLazyListState()
+    // Back previews and the restored home must start at the same carousel position.
+    val homeCarousel = rememberCarouselState {
+        1 + if (model.profile != null) model.discovery.distinctBy { it.id }.size
+        else model.localCollections.count { it.key != "favorites" }
+    }
     val searchScroll = rememberLazyListState()
     val libraryScroll = rememberLazyListState()
     val savedPages = rememberSaveableStateHolder()
@@ -52,7 +59,7 @@ fun SonaApp(model: MusicViewModel, dark: Boolean, systemScheme: ColorScheme) {
     val scope = rememberCoroutineScope()
     @Composable fun BrowseContent(page: Page, preview: Boolean = false) {
         when (page) {
-            Page.Home -> HomeScreen(model, homeScroll)
+            Page.Home -> HomeScreen(model, homeScroll, homeCarousel)
             Page.Search -> SearchScreen(model, searchScroll, preview)
             Page.Library -> LibraryScreen(model, libraryScroll)
             Page.Login -> LoginScreen(model, preview)
@@ -81,41 +88,6 @@ fun SonaApp(model: MusicViewModel, dark: Boolean, systemScheme: ColorScheme) {
                 isAppearanceLightStatusBars = systemBarSurface.luminance() > 0.5f
                 isAppearanceLightNavigationBars = systemBarSurface.luminance() > 0.5f
             }
-        }
-    }
-    val playerState = remember { SeekableTransitionState(expanded) }
-    val playerTransition = rememberTransition(playerState, label = "shared-player")
-    val motion = MaterialTheme.motionScheme
-    val playerCover = if (model.boldPlayer) MaterialShapes.Cookie9Sided else MaterialShapes.Square
-    val coverMorph = remember(playerCover) { Morph(playerCover, MaterialShapes.Circle) }
-    val coverProgress by playerTransition.animateFloat({ motion.defaultSpatialSpec() }, label = "cover-shape") {
-        if (it) 0f else 1f
-    }
-    val classicCorner by playerTransition.animateFloat({ motion.defaultSpatialSpec() }, label = "classic-cover-corner") {
-        if (it) 6f else 50f
-    }
-    val playerAtRest = playerState.currentState == playerState.targetState
-    // A seekable transition resets its timeline after completion. The resting artwork
-    // must use its destination shape rather than an animation sample from that timeline.
-    val coverShape = when {
-        playerAtRest && !playerState.targetState -> CircleShape
-        !model.boldPlayer -> RoundedCornerShape(percent = if (playerAtRest) 6 else classicCorner.roundToInt().coerceIn(0, 50))
-        playerAtRest -> MorphShape(playerCover)
-        else -> MorphShape(playerCover, coverMorph, coverProgress.coerceIn(0f, 1f))
-    }
-    var releaseExpansion by remember { mutableFloatStateOf(1f) }
-    val playerBackPreview = rememberBackPreview(
-        enabled = expanded && !model.lyricsVisible && !model.queueVisible && !model.outputVisible,
-        onBack = {
-            releaseExpansion = if (playerAtRest) 1f else (1f - coverProgress).coerceIn(0f, 1f)
-            model.playerExpanded = false
-        })
-    LaunchedEffect(expanded, playerBackPreview.gesturing) {
-        if (playerBackPreview.gesturing) {
-            // Keep the exact displayed entrance frame while the gesture owns the player.
-            playerState.seekTo(playerState.fraction)
-        } else {
-            playerState.animateTo(expanded)
         }
     }
     Box(Modifier.fillMaxSize().background(systemBarSurface)) {
@@ -156,6 +128,70 @@ fun SonaApp(model: MusicViewModel, dark: Boolean, systemScheme: ColorScheme) {
                 }
             }
         }
+        PlayerOverlay(model, songScheme, expanded)
+        SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
+            .padding(start = 16.dp, end = 16.dp, bottom = if (model.current != null && !expanded) 88.dp else 16.dp))
+    }
+    if (model.queueVisible) MaterialTheme(colorScheme = songScheme) { QueueSheet(model) }
+    if (model.accountVisible) AccountSheet(model,
+        onDismiss = { model.accountVisible = false },
+        onLogin = {
+            model.accountVisible = false
+            model.page = Page.Login
+            scope.launch { drawer.close() }
+        })
+    if (model.outputVisible) MaterialTheme(colorScheme = songScheme) {
+        MediaOutputSheet(playing = model.playing, onPlay = model::togglePlay,
+            onPrevious = model::previous, onNext = model::next,
+            previousEnabled = model.canSkipPrevious, nextEnabled = model.canSkipNext) { model.outputVisible = false }
+    }
+}
+
+@UnstableApi
+@Composable
+private fun BoxScope.PlayerOverlay(model: MusicViewModel, songScheme: ColorScheme, expanded: Boolean) {
+    val playerState = remember { SeekableTransitionState(expanded) }
+    val playerTransition = rememberTransition(playerState, label = "shared-player")
+    val motion = MaterialTheme.motionScheme
+    // The shape mode decides what the bold player's cover silhouette is; the ViewModel owns the pick
+    // so "never repeat the previous track" can remember what was shown.
+    val playerCover = if (model.boldPlayer) coverPolygons[model.coverShapeIndex.coerceIn(0, coverPolygons.size - 1)]
+        else MaterialShapes.Square
+    // Normalized before morphing, the same way the framework's loading indicator does it, so shapes
+    // with different vertex counts can still morph into the circular mini-player cover.
+    val coverMorph = remember(playerCover) {
+        runCatching { Morph(playerCover.normalized(), MaterialShapes.Circle.normalized()) }.getOrNull()
+    }
+    val coverProgress by playerTransition.animateFloat({ motion.defaultSpatialSpec() }, label = "cover-shape") {
+        if (it) 0f else 1f
+    }
+    val classicCorner by playerTransition.animateFloat({ motion.defaultSpatialSpec() }, label = "classic-cover-corner") {
+        if (it) 6f else 50f
+    }
+    val playerAtRest = playerState.currentState == playerState.targetState
+    // A seekable transition resets its timeline after completion. The resting artwork
+    // must use its destination shape rather than an animation sample from that timeline.
+    val coverShape = when {
+        playerAtRest && !playerState.targetState -> CircleShape
+        !model.boldPlayer -> RoundedCornerShape(percent = if (playerAtRest) 6 else classicCorner.roundToInt().coerceIn(0, 50))
+        playerAtRest -> MorphShape(playerCover)
+        else -> MorphShape(playerCover, coverMorph, coverProgress.coerceIn(0f, 1f))
+    }
+    var releaseExpansion by remember { mutableFloatStateOf(1f) }
+    val playerBackPreview = rememberBackPreview(
+        enabled = expanded && !model.deskMode && !model.lyricsVisible && !model.queueVisible && !model.outputVisible,
+        onBack = {
+            releaseExpansion = if (playerAtRest) 1f else (1f - coverProgress).coerceIn(0f, 1f)
+            model.playerExpanded = false
+        })
+    LaunchedEffect(expanded, playerBackPreview.gesturing) {
+        if (playerBackPreview.gesturing) {
+            // Keep the exact displayed entrance frame while the gesture owns the player.
+            playerState.seekTo(playerState.fraction)
+        } else {
+            playerState.animateTo(expanded)
+        }
+    }
         model.current?.let { song ->
             // Transform the overlay and all its shared children together, not just the
             // normal player layer. Keep browse content outside this transformed scope.
@@ -179,6 +215,7 @@ fun SonaApp(model: MusicViewModel, dark: Boolean, systemScheme: ColorScheme) {
                             .testTag("floating-player")
                             .sharedBounds(shared.rememberSharedContentState("player-container"), this,
                                 boundsTransform = { _, _ -> motion.defaultSpatialSpec<Rect>() },
+                                resizeMode = SharedTransitionScope.ResizeMode.scaleToBounds(ContentScale.FillBounds),
                                 clipInOverlayDuringTransition = OverlayClip(CircleShape)), shared, this, coverShape)
                     }
                     playerTransition.AnimatedVisibility({ it }, Modifier.fillMaxSize(),
@@ -190,9 +227,11 @@ fun SonaApp(model: MusicViewModel, dark: Boolean, systemScheme: ColorScheme) {
                         Surface(modifier = Modifier.fillMaxSize().testTag("expanded-player")
                             .sharedBounds(shared.rememberSharedContentState("player-container"), this,
                                 boundsTransform = { _, _ -> motion.defaultSpatialSpec<Rect>() },
+                                resizeMode = SharedTransitionScope.ResizeMode.scaleToBounds(ContentScale.FillBounds),
                                 clipInOverlayDuringTransition = OverlayClip(RoundedCornerShape(corner))),
                             color = songScheme.primaryContainer, contentColor = songScheme.onPrimaryContainer) {
-                            PlayerScreen(model, shared, this, coverShape,
+                            if (model.deskMode) DeskPlayerScreen(model)
+                            else PlayerScreen(model, shared, this, coverShape,
                                 styleSwitchEnabled = expanded && !playerBackPreview.gesturing &&
                                     !playerBackPreview.committed)
                         }
@@ -200,22 +239,6 @@ fun SonaApp(model: MusicViewModel, dark: Boolean, systemScheme: ColorScheme) {
                 }
             }
         }
-        SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
-            .padding(start = 16.dp, end = 16.dp, bottom = if (model.current != null && !expanded) 88.dp else 16.dp))
-    }
-    if (model.queueVisible) MaterialTheme(colorScheme = songScheme) { QueueSheet(model) }
-    if (model.accountVisible) AccountSheet(model,
-        onDismiss = { model.accountVisible = false },
-        onLogin = {
-            model.accountVisible = false
-            model.page = Page.Login
-            scope.launch { drawer.close() }
-        })
-    if (model.outputVisible) MaterialTheme(colorScheme = songScheme) {
-        MediaOutputSheet(playing = model.playing, onPlay = model::togglePlay,
-            onPrevious = model::previous, onNext = model::next,
-            previousEnabled = model.canSkipPrevious, nextEnabled = model.canSkipNext) { model.outputVisible = false }
-    }
 }
 
 @UnstableApi
@@ -251,7 +274,7 @@ private fun MiniPlayer(
             Row(Modifier.padding(start = 7.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Artwork(song.cover, Modifier.size(52.dp)
                     .sharedElement(rememberSharedContentState("art:${song.key}"), visibility,
-                        boundsTransform = { _, _ -> motion.defaultSpatialSpec<Rect>() }).clip(coverShape))
+                        boundsTransform = { _, _ -> motion.defaultSpatialSpec<Rect>() }, zIndexInOverlay = 1f).clip(coverShape))
                 Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                     Text(song.title, Modifier.sharedBounds(rememberSharedContentState("title:${song.id}"), visibility,
                         boundsTransform = { _, _ -> motion.defaultSpatialSpec<Rect>() }),

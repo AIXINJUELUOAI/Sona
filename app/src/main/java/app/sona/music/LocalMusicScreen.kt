@@ -91,7 +91,9 @@ fun LocalMusicScreen(model: MusicViewModel, preview: Boolean = false) {
                     EmptyState("还没找到本地音乐", "将音频保存到手机的 Music 文件夹，再重新扫描。这里读取系统音乐库中的歌曲。", Icons.Rounded.MusicNote)
                 }
                 itemsIndexed(songs, key = { _, song -> song.key }) { index, song ->
-                    SongRow(song, song.key == model.current?.key, index, songs.size, showSource = false) { if (!preview) model.play(songs, index) }
+                    SongRow(song, song.key == model.current?.key, index, songs.size, showSource = false) {
+                        if (!preview) model.play(songs, index, source = "local-library")
+                    }
                 }
             }
         }

@@ -124,25 +124,8 @@ private fun ListeningStat(label: String, value: String, modifier: Modifier = Mod
 
 @Composable
 private fun ListeningTimeline(days: List<ListeningDay>) {
-    val scheme = MaterialTheme.colorScheme
-    val max = days.maxOfOrNull { it.milliseconds } ?: 0L
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Bottom) {
-        days.forEach { day ->
-            val isToday = day.date == days.last().date
-            val fraction = if (max > 0) (day.milliseconds.toFloat() / max).coerceIn(0f, 1f) else 0f
-            Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                Box(Modifier.fillMaxWidth().height((56.dp * fraction).coerceAtLeast(6.dp)).clip(CircleShape)
-                    .background(if (isToday) scheme.primary else scheme.primary.copy(alpha = .32f)))
-                Spacer(Modifier.height(6.dp))
-                Text(if (isToday) "今" else weekdayLabel(day.date), style = MaterialTheme.typography.labelSmall,
-                    color = if (isToday) scheme.primary else scheme.onSurfaceVariant,
-                    fontWeight = if (isToday) FontWeight.Bold else FontWeight.Normal)
-            }
-        }
-    }
+    ListeningDayChart(days, barHeight = 56.dp)
 }
-
-private fun weekdayLabel(date: LocalDate): String = "一二三四五六日"[date.dayOfWeek.value - 1].toString()
 
 @Composable
 private fun ListeningBadge() {

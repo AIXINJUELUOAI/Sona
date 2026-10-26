@@ -2,8 +2,11 @@
 package app.sona.music
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 
 import android.content.Intent
 import androidx.compose.foundation.Image
@@ -25,7 +28,7 @@ import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material3.*
 import androidx.compose.material3.carousel.HorizontalMultiBrowseCarousel
-import androidx.compose.material3.carousel.rememberCarouselState
+import androidx.compose.material3.carousel.CarouselState
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -59,22 +62,58 @@ import java.io.File
 
 @UnstableApi
 @Composable
-fun HomeScreen(model: MusicViewModel, scroll: LazyListState) {
-    HomeContent(model.profile?.name, model.daily, model.discovery, model.busy, scroll,
-        model::refresh, model::openDaily, model::openLikedSongs, model::openList,
-        { model.page = Page.Library }, { model.page = Page.Search },
-        model::openRecent, model::playRadio,
+fun HomeScreen(model: MusicViewModel, scroll: LazyListState, carousel: CarouselState) {
+    val loggedIn = model.profile != null
+    val hero = if (loggedIn) model.daily else model.localDaily
+    val heroActive = model.current?.let { current -> hero.any { it.key == current.key } } == true
+    HomeContent(
+        loggedIn = loggedIn,
+        daily = model.daily,
+        localDaily = model.localDaily,
+        discovery = model.discovery,
+        localCollections = model.localCollections,
+        heroActive = heroActive,
+        heroPlaying = heroActive && model.playing,
+        heroCover = if (heroActive) model.current?.cover else null,
+        refreshing = model.busy,
+        scroll = scroll,
+        carousel = carousel,
+        onRefresh = model::refresh,
+        onDaily = {
+            if (loggedIn) model.openDaily()
+            else if (model.localDaily.isEmpty()) model.page = Page.Local
+            else model.openLocalDaily()
+        },
+        onDailyPlay = {
+            when {
+                heroActive -> model.togglePlay()
+                loggedIn -> model.playDaily()
+                model.localDaily.isEmpty() -> model.page = Page.Local
+                else -> model.play(model.localDaily, origin = PlaybackOrigin.OutsideList,
+                    source = model.localDailySource, restartQueue = true)
+            }
+        },
+        onFavorites = model::openLikedSongs,
+        onPlaylist = model::openList,
+        onLocalCollection = model::openLocalCollection,
+        onLibrary = { model.page = Page.Library },
+        onSearch = { model.page = Page.Search },
+        onRecent = model::openRecent,
+        onRadio = model::playRadio,
         bottomInset = contentBottomPadding(model.current != null),
-        onLocal = { model.page = Page.Local }, onDailyPlay = model::playDaily)
+        onLocal = { model.page = Page.Local }
+    )
 }
 
 @Composable
 internal fun HomeContent(
-    userName: String?, daily: List<Song>, discovery: List<MusicList>, refreshing: Boolean,
-    scroll: LazyListState, onRefresh: () -> Unit, onDaily: () -> Unit, onFavorites: () -> Unit,
-    onPlaylist: (MusicList) -> Unit, onLibrary: () -> Unit, onSearch: () -> Unit,
-    onRecent: () -> Unit, onRadio: () -> Unit, bottomInset: Dp = 24.dp,
-    onLocal: () -> Unit = {}, onDailyPlay: () -> Unit = onDaily
+    loggedIn: Boolean, daily: List<Song>, localDaily: List<Song>,
+    discovery: List<MusicList>, localCollections: List<LocalCollection>, refreshing: Boolean,
+    heroActive: Boolean, heroPlaying: Boolean, heroCover: String?,
+    scroll: LazyListState, carousel: CarouselState, onRefresh: () -> Unit, onDaily: () -> Unit, onDailyPlay: () -> Unit,
+    onFavorites: () -> Unit, onPlaylist: (MusicList) -> Unit, onLocalCollection: (LocalCollection) -> Unit,
+    onLibrary: () -> Unit, onSearch: () -> Unit, onRecent: () -> Unit, onRadio: () -> Unit,
+    bottomInset: Dp = 24.dp, onLocal: () -> Unit = {}
 ) {
     val scheme = MaterialTheme.colorScheme
     BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -95,32 +134,38 @@ internal fun HomeContent(
                 contentPadding = PaddingValues(start = 20.dp, end = 20.dp,
                     top = 8.dp, bottom = bottomInset),
                 verticalArrangement = Arrangement.spacedBy(20.dp)) {
-                item(key = "daily") { DailyHero(userName, daily, discovery, onDaily, onDailyPlay) }
-                item(key = "playlists") {
+                item(key = "daily") {
+                    DailyHero(loggedIn, if (loggedIn) daily else localDaily, discovery,
+                        heroCover, heroActive, heroPlaying, onDaily, onDailyPlay)
+                }
+                if (loggedIn || localCollections.isNotEmpty()) item(key = "playlists") {
                     Column(Modifier.testTag("home-playlists"), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         SectionHeading("为你精选", "资料库", onLibrary)
-                        HomePlaylistStrip(discovery, refreshing, onFavorites, onPlaylist, onRefresh, tileSize)
+                        HomePlaylistStrip(loggedIn, discovery, localCollections, refreshing,
+                            onFavorites, onPlaylist, onLocalCollection, onRefresh, tileSize, carousel)
                     }
                 }
                 item(key = "list") {
+                    // Private FM is a signed-in feature: in local mode the row disappears instead of
+                    // leading to a login wall.
+                    val rows = buildList {
+                        add(HomeRow("本地音乐", "手机里的音乐，离线也能听", Icons.Outlined.Folder, onLocal))
+                        if (loggedIn) add(HomeRow("私人 FM", "根据喜好持续推荐", Icons.Rounded.Sensors, onRadio))
+                        add(HomeRow("最近播放", "接着上次的继续", Icons.Rounded.History, onRecent))
+                    }
                     Column(Modifier.testTag("home-list"), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         SectionHeading("听点别的")
                         Column(verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
-                            SegmentedListItem(onClick = onLocal, shapes = ListItemDefaults.segmentedShapes(0, 3).copy(shape = segmentedOuterShape(0, 3)),
-                                colors = ListItemDefaults.segmentedColors(containerColor = scheme.surfaceContainer),
-                                leadingContent = { Icon(Icons.Outlined.Folder, null, tint = scheme.primary) },
-                                supportingContent = { Text("手机里的音乐，离线也能听") },
-                                trailingContent = { Icon(Icons.Rounded.ChevronRight, null) }) { Text("本地音乐", fontWeight = FontWeight.SemiBold) }
-                            SegmentedListItem(onClick = onRadio, shapes = ListItemDefaults.segmentedShapes(1, 3).copy(shape = segmentedOuterShape(1, 3)),
-                                colors = ListItemDefaults.segmentedColors(containerColor = scheme.surfaceContainer),
-                                leadingContent = { Icon(Icons.Rounded.Sensors, null, tint = scheme.primary) },
-                                supportingContent = { Text("根据喜好持续推荐") },
-                                trailingContent = { Icon(Icons.Rounded.ChevronRight, null) }) { Text("私人 FM", fontWeight = FontWeight.SemiBold) }
-                            SegmentedListItem(onClick = onRecent, shapes = ListItemDefaults.segmentedShapes(2, 3).copy(shape = segmentedOuterShape(2, 3)),
-                                colors = ListItemDefaults.segmentedColors(containerColor = scheme.surfaceContainer),
-                                leadingContent = { Icon(Icons.Rounded.History, null, tint = scheme.primary) },
-                                supportingContent = { Text("接着上次的继续") },
-                                trailingContent = { Icon(Icons.Rounded.ChevronRight, null) }) { Text("最近播放", fontWeight = FontWeight.SemiBold) }
+                            rows.forEachIndexed { index, row ->
+                                SegmentedListItem(onClick = row.onClick,
+                                    shapes = ListItemDefaults.segmentedShapes(index, rows.size).copy(shape = segmentedOuterShape(index, rows.size)),
+                                    colors = ListItemDefaults.segmentedColors(containerColor = scheme.surfaceContainer),
+                                    leadingContent = { Icon(row.icon, null, tint = scheme.primary) },
+                                    supportingContent = { Text(row.subtitle) },
+                                    trailingContent = { Icon(Icons.Rounded.ChevronRight, null) }) {
+                                    Text(row.title, fontWeight = FontWeight.SemiBold)
+                                }
+                            }
                         }
                     }
                 }
@@ -130,10 +175,14 @@ internal fun HomeContent(
     }
 }
 
+private data class HomeRow(val title: String, val subtitle: String, val icon: ImageVector, val onClick: () -> Unit)
+
+private data class HomeTile(val key: String, val title: String, val cover: String, val icon: ImageVector?, val onClick: () -> Unit)
+
 // Greeting, daily card and an overlapping shaped cover, following the approved home mock-up.
 @Composable
-private fun DailyHero(userName: String?, daily: List<Song>, discovery: List<MusicList>, onDaily: () -> Unit,
-    onDailyPlay: () -> Unit) {
+private fun DailyHero(loggedIn: Boolean, hero: List<Song>, discovery: List<MusicList>, activeCover: String?,
+    active: Boolean, playing: Boolean, onDaily: () -> Unit, onDailyPlay: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
     BoxWithConstraints(Modifier.fillMaxWidth().testTag("home-daily")) {
         val coverSize = (maxWidth * 0.54f).coerceIn(156.dp, 230.dp)
@@ -148,58 +197,78 @@ private fun DailyHero(userName: String?, daily: List<Song>, discovery: List<Musi
             modifier = Modifier.padding(top = cardTop).fillMaxWidth()) {
             Column(Modifier.padding(20.dp).fillMaxWidth(0.53f).heightIn(min = coverSize - 56.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Column {
-                    Text("每日推荐", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                    Text(if (loggedIn) "每日推荐" else "今日推荐", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
                     Row(verticalAlignment = Alignment.Bottom) {
-                        Text(if (daily.isNotEmpty()) daily.size.toString() else "为你", fontSize = 50.sp, lineHeight = 54.sp,
-                            fontWeight = FontWeight.Black, maxLines = 1)
-                        if (daily.isNotEmpty()) Text(" 首", Modifier.padding(bottom = 5.dp), style = MaterialTheme.typography.labelMedium)
+                        Text(if (hero.isNotEmpty()) hero.size.toString() else if (loggedIn) "为你" else "0",
+                            fontSize = 50.sp, lineHeight = 54.sp, fontWeight = FontWeight.Black, maxLines = 1)
+                        if (hero.isNotEmpty()) Text(" 首", Modifier.padding(bottom = 5.dp), style = MaterialTheme.typography.labelMedium)
                     }
                 }
-                MorphingControl(Icons.Rounded.PlayArrow, if (userName == null) "登录查看每日推荐" else "播放每日推荐",
+                MorphingControl(if (active && playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                    when {
+                        active && playing -> "暂停"
+                        !loggedIn && hero.isEmpty() -> "扫描本地音乐"
+                        loggedIn -> "播放每日推荐"
+                        else -> "播放今日推荐"
+                    },
                     onDailyPlay, Modifier.width(96.dp).height(48.dp), height = 48.dp, iconSize = 28.dp,
                     containerColor = scheme.primary, contentColor = scheme.onPrimary)
             }
         }
         val shape = MaterialShapes.Cookie9Sided.toShape()
-        Artwork(daily.firstOrNull()?.cover ?: discovery.firstOrNull()?.cover,
+        // While the mix is playing, the hero shows the track that is actually sounding.
+        Artwork(activeCover?.takeIf { it.isNotBlank() } ?: hero.firstOrNull()?.cover ?: discovery.firstOrNull()?.cover,
             Modifier.align(Alignment.TopEnd).padding(top = cardTop - rise + coverDrop).offset(x = overflowEnd).size(coverSize).clip(shape)
-                .clickable(onClickLabel = "查看每日推荐", onClick = onDaily).testTag("daily-cover"))
+                .clickable(onClickLabel = if (loggedIn) "查看每日推荐" else "查看今日推荐", onClick = onDaily).testTag("daily-cover"))
     }
 }
 
 @Composable
-private fun HomePlaylistStrip(lists: List<MusicList>, loading: Boolean, onFavorites: () -> Unit,
-    onPlaylist: (MusicList) -> Unit, onRetry: () -> Unit, tileSize: Dp) {
-    val entries = lists.distinctBy { it.id }
+private fun HomePlaylistStrip(loggedIn: Boolean, discovery: List<MusicList>, localCollections: List<LocalCollection>,
+    loading: Boolean, onFavorites: () -> Unit, onPlaylist: (MusicList) -> Unit,
+    onLocalCollection: (LocalCollection) -> Unit, onRetry: () -> Unit, tileSize: Dp, carousel: CarouselState) {
+    val tiles = buildList {
+        add(HomeTile("favorites", "我喜欢的音乐", "", Icons.Rounded.Favorite, onFavorites))
+        if (loggedIn) discovery.distinctBy { it.id }.forEach { list ->
+            add(HomeTile("list-${list.id}", list.name, list.cover, null) { onPlaylist(list) })
+        } else localCollections.filter { it.key != "favorites" }.forEach { collection ->
+            add(HomeTile(collection.key, collection.title, collection.songs.firstOrNull()?.cover.orEmpty(), null) {
+                onLocalCollection(collection)
+            })
+        }
+    }
+    val display: List<HomeTile?> = if (tiles.isEmpty()) List(2) { null } else tiles
     val tileShape = outerCornerShape
-    @Composable fun Tile(index: Int, modifier: Modifier, coverModifier: Modifier = Modifier) {
-        val favorite = index == 0
-        val list = entries.getOrNull(index - 1)
-        Column(modifier.clickable(enabled = favorite || list != null || !loading) {
-            if (favorite) onFavorites() else if (list != null) onPlaylist(list) else onRetry()
+    @Composable fun Tile(tile: HomeTile?, modifier: Modifier, coverModifier: Modifier = Modifier) {
+        val tileIcon = tile?.icon
+        Column(modifier.clickable(enabled = tile != null || !loading) {
+            if (tile != null) tile.onClick() else onRetry()
         }, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Surface(
-                shape = tileShape, color = if (favorite) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainer,
+            Surface(shape = tileShape,
+                color = if (tileIcon != null) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainer,
                 modifier = Modifier.fillMaxWidth().height(tileSize).then(coverModifier)) {
                 Box(contentAlignment = Alignment.Center) {
-                    if (favorite) Icon(Icons.Rounded.Favorite, null, Modifier.size(56.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
-                    else if (list != null) Artwork(list.cover, Modifier.fillMaxSize(), list.name)
-                    else if (loading) LoadingIndicator(Modifier.size(32.dp))
-                    else Icon(Icons.Rounded.Refresh, "重新加载推荐")
+                    when {
+                        tileIcon != null -> Icon(tileIcon, null, Modifier.size(56.dp),
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer)
+                        tile != null -> Artwork(tile.cover, Modifier.fillMaxSize(), tile.title)
+                        loading -> LoadingIndicator(Modifier.size(32.dp))
+                        else -> Icon(Icons.Rounded.Refresh, "重新加载推荐")
+                    }
                 }
             }
-            Text(if (favorite) "我喜欢的音乐" else list?.name ?: if (loading) "正在发现好音乐" else "轻点重试",
+            Text(tile?.title ?: if (loading) "正在发现好音乐" else "轻点重试",
                 maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelLarge)
         }
     }
-    if (entries.size <= 1) {
+    if (display.size <= 2) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Tile(0, Modifier.weight(1f)); Tile(1, Modifier.weight(1f))
+            display.forEach { Tile(it, Modifier.weight(1f)) }
         }
     } else {
-        HorizontalMultiBrowseCarousel(state = rememberCarouselState { entries.size + 1 }, preferredItemWidth = tileSize,
+        HorizontalMultiBrowseCarousel(state = carousel, preferredItemWidth = tileSize,
             itemSpacing = 8.dp, modifier = Modifier.fillMaxWidth().height(tileSize + 30.dp)) { index ->
-            Tile(index, Modifier.fillMaxSize(), Modifier.maskClip(tileShape))
+            Tile(display[index], Modifier.fillMaxSize(), Modifier.maskClip(tileShape))
         }
     }
 }
@@ -298,7 +367,7 @@ fun SearchScreen(model: MusicViewModel, scroll: LazyListState, preview: Boolean 
             }
             itemsIndexed(searchResults, key = { _, s -> s.key }) { index, song ->
                 SongRow(song, song.key == model.current?.key, index, searchResults.size,
-                    showSource = model.searchSource != SearchSource.Local) { model.play(searchResults, index) }
+                    showSource = model.searchSource != SearchSource.Local) { model.play(searchResults, index, source = model.searchQueueSource) }
             }
             if (model.searchLoading) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { LoadingIndicator() } }
             else if (model.searchHasMore) item { TextButton(onClick = { model.search(more = true) }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("加载更多") } }
@@ -367,45 +436,50 @@ private fun LocalPlaylistRow(title: String, subtitle: String, icon: ImageVector,
 fun SongsScreen(model: MusicViewModel, back: () -> Unit, dailyRecommendations: Boolean = false) {
     val songs = if (dailyRecommendations) model.daily else model.songList
     val loading = if (dailyRecommendations) model.busy else model.listLoading
-    val scroll = rememberLazyListState()
+    val source = if (dailyRecommendations) model.dailySource else model.songListSource
+    val scroll = key(source) { rememberLazyListState() }
     val bottomPadding = contentBottomPadding(model.current != null)
     Column(Modifier.fillMaxSize()) {
-        PageHeader(if (dailyRecommendations) "每日推荐" else model.songListTitle, back) {
-            LocatePlayingButton(scroll, songs, model.current?.key,
-                leadingItems = (if (dailyRecommendations) 1 else 0) + (if (songs.isNotEmpty()) 1 else 0), bottomInset = bottomPadding)
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val showPlayLabel = maxWidth >= 440.dp
+            PageHeader(if (dailyRecommendations) "每日推荐" else model.songListTitle, back,
+                subtitle = "共 ${songs.size} 首") {
+                LocatePlayingButton(scroll, songs, model.current?.key,
+                    leadingItems = if (dailyRecommendations) 1 else 0, bottomInset = bottomPadding, alwaysVisible = true)
+                Button(onClick = {
+                    model.play(songs, source = source, restartQueue = true, origin = PlaybackOrigin.OutsideList)
+                    model.playerExpanded = true
+                }, enabled = songs.isNotEmpty() && !loading, shapes = ButtonDefaults.shapes(),
+                    modifier = if (showPlayLabel) Modifier.height(48.dp) else Modifier.size(48.dp),
+                    contentPadding = PaddingValues(horizontal = if (showPlayLabel) 16.dp else 0.dp)) {
+                    Icon(Icons.Rounded.PlayArrow, if (showPlayLabel) null else "播放全部", Modifier.size(24.dp))
+                    if (showPlayLabel) { Spacer(Modifier.width(6.dp)); Text("播放全部") }
+                }
+            }
         }
         LazyColumn(state = scroll, modifier = Modifier.weight(1f).scrollViewport(16.dp),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = bottomPadding),
             verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
             if (dailyRecommendations) item {
                 Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(model.dailyDate?.let { "${it.year}年${it.monthValue}月${it.dayOfMonth}日 · ${songs.size} 首" }
-                        ?: if (loading) "正在获取每日推荐" else "${songs.size} 首", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge,
+                    Text(model.dailyDate?.let { "${it.year}年${it.monthValue}月${it.dayOfMonth}日" }
+                        ?: if (loading) "正在获取每日推荐" else "今日推荐", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     TextButton(onClick = model::refresh, enabled = !loading) { Text("刷新") }
                 }
             }
-            if (songs.isNotEmpty()) item {
-                Row(Modifier.padding(bottom = 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Button(onClick = { model.play(songs); model.playerExpanded = true }, shapes = ButtonDefaults.shapes(),
-                        modifier = Modifier.heightIn(min = ButtonDefaults.MediumContainerHeight),
-                        contentPadding = ButtonDefaults.contentPaddingFor(ButtonDefaults.MediumContainerHeight)) {
-                        Icon(Icons.Rounded.PlayArrow, null, Modifier.size(ButtonDefaults.iconSizeFor(ButtonDefaults.MediumContainerHeight)))
-                        Spacer(Modifier.width(8.dp))
-                        Text("播放全部", style = ButtonDefaults.textStyleFor(ButtonDefaults.MediumContainerHeight))
-                    }
-                    if (!dailyRecommendations) Text("${songs.size} 首", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
             itemsIndexed(songs, key = { _, song -> song.key }) { index, song ->
                 SongRow(song, song.key == model.current?.key, index, songs.size,
-                    showSource = !dailyRecommendations && !model.songListIsCloudOnly && model.songListTitle != "本地收藏") { model.play(songs, index) }
+                    showSource = !dailyRecommendations && !model.songListIsCloudOnly && model.songListTitle != "本地收藏") {
+                    model.play(songs, index, source = source)
+                }
             }
             if (loading) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { LoadingIndicator() } }
             else if (!dailyRecommendations && model.listHasMore) item { TextButton(onClick = model::loadMoreList, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("加载更多") } }
             else if (songs.isEmpty()) item { EmptyState("还没有歌曲",
                 if (dailyRecommendations) "暂未获取到每日推荐，请点击刷新重试。"
                 else if (model.songListTitle == "为你混合推荐") "先读取本地音乐，或搜索并收听网易云歌曲，就能开始推荐。"
+                else if (model.songListTitle == "我喜欢的音乐") "点亮喜欢，歌曲就会出现在这里"
                 else "收藏、播放过的音乐和歌单内容会显示在这里", Icons.Rounded.MusicNote) }
         }
     }
@@ -524,7 +598,8 @@ private fun DrawerPreferences(model: MusicViewModel) {
         style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
     Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         PlayerStylePreview(false, !model.boldPlayer, { model.setPlayerStyle(PlayerStyleMode.Default) }, Modifier.weight(1f))
-        PlayerStylePreview(true, model.boldPlayer, { model.setPlayerStyle(PlayerStyleMode.Bold) }, Modifier.weight(1f))
+        PlayerStylePreview(true, model.boldPlayer, { model.setPlayerStyle(PlayerStyleMode.Bold) }, Modifier.weight(1f),
+            shapeIndex = model.coverShapeIndex)
     }
     Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween)) {
         PlayerStyleMode.entries.forEachIndexed { index, mode ->
@@ -538,8 +613,37 @@ private fun DrawerPreferences(model: MusicViewModel) {
                 }) { Text(mode.label, maxLines = 1) }
         }
     }
-    if (model.playerStyleMode == PlayerStyleMode.TapToSwitch) Text("点击封面切换样式",
-        Modifier.padding(horizontal = 12.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    if (model.playerStyleMode != PlayerStyleMode.Default) {
+        Text("封面形状", Modifier.padding(start = 12.dp, top = 12.dp, bottom = 4.dp),
+            style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+        val shapes = listOf("fixed" to "固定", "perSong" to "每首歌", "cycle" to "轮换")
+        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween)) {
+            shapes.forEachIndexed { index, (key, label) ->
+                ToggleButton(checked = model.coverShapeMode == key, onCheckedChange = { model.selectCoverShapeMode(key) },
+                    modifier = Modifier.weight(1f).semantics { role = Role.RadioButton },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                    shapes = when (index) {
+                        0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
+                        shapes.lastIndex -> ButtonGroupDefaults.connectedTrailingButtonShapes()
+                        else -> ButtonGroupDefaults.connectedMiddleButtonShapes()
+                    }) { Text(label, maxLines = 1) }
+            }
+        }
+        if (model.coverShapeMode == "fixed") {
+            Row(Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 4.dp)
+                .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                coverPolygons.forEachIndexed { index, polygon ->
+                    val selected = model.coverFixedShapeIndex == index
+                    Box(Modifier.size(44.dp).clip(MorphShape(polygon))
+                        .background(if (selected) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.surfaceContainerHighest)
+                        .clickable { model.selectFixedCoverShape(index) })
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -550,30 +654,46 @@ private fun DrawerActionIcon(icon: ImageVector, background: Color, foreground: C
 }
 
 @Composable
-private fun PlayerStylePreview(bold: Boolean, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun PlayerStylePreview(bold: Boolean, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier,
+    shapeIndex: Int = 0) {
     val scheme = MaterialTheme.colorScheme
     Surface(onClick = onClick, modifier = modifier, shape = RoundedCornerShape(20.dp),
         color = if (selected) scheme.secondaryContainer else scheme.surfaceContainerHigh,
         contentColor = if (selected) scheme.onSecondaryContainer else scheme.onSurface) {
-        Column(Modifier.padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box(Modifier.fillMaxWidth().height(104.dp)) {
-                if (!bold) Column(Modifier.align(Alignment.TopStart), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Box(Modifier.size(40.dp, 5.dp).clip(CircleShape).background(scheme.primary))
-                    Box(Modifier.size(26.dp, 3.dp).clip(CircleShape).background(scheme.primary.copy(alpha = .6f)))
-                }
-                if (bold) Column(Modifier.align(Alignment.TopStart), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    repeat(2) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                            repeat(2) { Box(Modifier.size(18.dp, 22.dp).clip(RoundedCornerShape(4.dp)).background(scheme.primary)) }
-                        }
+        Column(Modifier.padding(horizontal = 10.dp, vertical = 12.dp), horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Box(Modifier.fillMaxWidth().height(96.dp)) {
+                if (bold) {
+                    // Two lines mirror the bold layout's stacked title; the cover is meant to overlap it.
+                    Text("SO\nNA", Modifier.align(Alignment.TopStart), color = scheme.primary,
+                        style = MaterialTheme.typography.headlineLarge.copy(lineHeight = 36.sp),
+                        fontWeight = FontWeight.Black, maxLines = 2)
+                } else {
+                    Column(Modifier.align(Alignment.TopStart), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("sona", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold,
+                            color = scheme.primary)
+                        Text("hi Listener", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
                     }
                 }
-                Box(Modifier.align(if (bold) Alignment.BottomEnd else Alignment.TopCenter)
-                    .offset(y = if (bold) 0.dp else 24.dp).size(if (bold) 60.dp else 76.dp)
-                    .clip(if (bold) MaterialShapes.Cookie9Sided.toShape() else RoundedCornerShape(4.dp))
-                    .background(scheme.primary), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Rounded.MusicNote, null, tint = scheme.onPrimary, modifier = Modifier.size(28.dp))
+                if (bold) {
+                    // Live sample of the current cover-shape mode, fading between silhouettes.
+                    // Shifted left and up so it visibly bites into the second title line, the way
+                    // the real bold layout lets the artwork cover the title.
+                    Crossfade(targetState = shapeIndex,
+                        modifier = Modifier.align(Alignment.BottomEnd).offset(x = (-18).dp, y = (-2).dp).size(58.dp),
+                        animationSpec = tween(220), label = "preview-cover-shape") { index ->
+                        Box(Modifier.fillMaxSize()
+                            .clip(MorphShape(coverPolygons[index.coerceIn(0, coverPolygons.size - 1)]))
+                            .background(scheme.primary), contentAlignment = Alignment.Center) {
+                            Icon(Icons.Rounded.MusicNote, null, tint = scheme.onPrimary, modifier = Modifier.size(22.dp))
+                        }
+                    }
+                } else {
+                    Box(Modifier.align(Alignment.BottomCenter).size(46.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(scheme.primary), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Rounded.MusicNote, null, tint = scheme.onPrimary, modifier = Modifier.size(22.dp))
+                    }
                 }
             }
             Text(if (bold) "大胆" else "默认", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)

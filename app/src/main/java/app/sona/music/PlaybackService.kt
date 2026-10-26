@@ -16,6 +16,7 @@ import android.os.Bundle
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import androidx.media3.common.Player
+import androidx.media3.common.MediaMetadata
 import androidx.media3.exoplayer.source.ShuffleOrder.DefaultShuffleOrder
 import java.util.concurrent.Executors
 
@@ -23,6 +24,8 @@ import java.util.concurrent.Executors
 class PlaybackService : MediaSessionService() {
     companion object {
         const val ANCHOR_SHUFFLE = "app.sona.music.ANCHOR_SHUFFLE"
+        const val KEEP_SHUFFLE_ORDER = "app.sona.music.KEEP_SHUFFLE_ORDER"
+        const val QUEUE_SOURCE = "sona_queue_source"
     }
     private var session: MediaSession? = null
     private var preloader: AudioPreloader? = null
@@ -50,9 +53,10 @@ class PlaybackService : MediaSessionService() {
     }
     private val tick = object : Runnable {
         override fun run() {
+            if (destroyed || !trackingPlaying) return
             recordElapsed()
-            if (++ticks % 5 == 0) savePlayback()
-            handler.postDelayed(this, 1000)
+            if (++ticks % 6 == 0) savePlayback()
+            handler.postDelayed(this, 5000)
         }
     }
     private fun savePlayback() {
@@ -66,7 +70,7 @@ class PlaybackService : MediaSessionService() {
             player.shuffleModeEnabled, player.repeatMode,
             if (timeline.windowCount == count) queueOrder(count, timeline.getFirstWindowIndex(true)) {
                 timeline.getNextWindowIndex(it, Player.REPEAT_MODE_OFF, true)
-            } else (0 until count).toList())
+            } else (0 until count).toList(), player.playlistMetadata.extras?.getString(QUEUE_SOURCE).orEmpty())
         if (snapshotSaved && snapshot == lastSnapshot) return
         snapshotSaved = true
         lastSnapshot = snapshot
@@ -88,6 +92,9 @@ class PlaybackService : MediaSessionService() {
                     applyingRestore = true
                     try {
                         player.setMediaItems(snapshot.songs.map { it.mediaItem() }, snapshot.index, snapshot.position)
+                        player.playlistMetadata = MediaMetadata.Builder().setExtras(Bundle().apply {
+                            putString(QUEUE_SOURCE, snapshot.source)
+                        }).build()
                         player.setShuffleOrder(DefaultShuffleOrder(snapshot.order.toIntArray(), System.nanoTime()))
                         player.shuffleModeEnabled = snapshot.shuffle
                         player.repeatMode = if (snapshot.shuffle) Player.REPEAT_MODE_ALL else snapshot.repeat
@@ -107,8 +114,12 @@ class PlaybackService : MediaSessionService() {
         val song = trackedSong ?: return
         if (trackingPlaying) {
             val settings = (application as MusicApplication).settings
-            settings.listeningHistory.record(song, elapsed)
-            if (tracker.advance(elapsed, song.duration)) settings.recordListening(song, skipped = false)
+            val endTime = System.currentTimeMillis()
+            storage.execute { settings.listeningHistory.record(song, elapsed, endTime) }
+            if (tracker.advance(elapsed, song.duration)) storage.execute {
+                settings.recordListening(song, skipped = false)
+                settings.listeningHistory.recordPlay(song, endTime)
+            }
         }
     }
     override fun onCreate() {
@@ -132,27 +143,37 @@ class PlaybackService : MediaSessionService() {
                 override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
                     if (shuffleModeEnabled) repeatMode = Player.REPEAT_MODE_ALL
                 }
+                override fun onRepeatModeChanged(repeatMode: Int) {
+                    // Shuffle always traverses a complete cycle, including after controller updates.
+                    if (shuffleModeEnabled && repeatMode != Player.REPEAT_MODE_ALL) {
+                        this@apply.repeatMode = Player.REPEAT_MODE_ALL
+                    }
+                }
                 override fun onEvents(player: Player, events: Player.Events) {
                     if (destroyed) return
                     preloader?.update(player)
                     if (restoring && !applyingRestore && player.mediaItemCount > 0) restoreAllowed = false
-                    if (events.containsAny(Player.EVENT_TIMELINE_CHANGED, Player.EVENT_MEDIA_METADATA_CHANGED,
+                    if (events.containsAny(Player.EVENT_TIMELINE_CHANGED, Player.EVENT_MEDIA_METADATA_CHANGED, Player.EVENT_PLAYLIST_METADATA_CHANGED,
                             Player.EVENT_POSITION_DISCONTINUITY, Player.EVENT_PLAY_WHEN_READY_CHANGED,
                             Player.EVENT_REPEAT_MODE_CHANGED, Player.EVENT_SHUFFLE_MODE_ENABLED_CHANGED,
                             Player.EVENT_PLAYBACK_STATE_CHANGED)) savePlayback()
                 }
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
+                    if (destroyed) return
                     recordElapsed()
                     trackingPlaying = isPlaying
-                    if (!isPlaying) (application as MusicApplication).settings.listeningHistory.flush()
+                    handler.removeCallbacks(tick)
+                    if (isPlaying) handler.postDelayed(tick, 5000)
+                    else storage.execute { (application as MusicApplication).settings.listeningHistory.flush() }
                     output.refresh()
                 }
                 override fun onMediaItemTransition(item: androidx.media3.common.MediaItem?, reason: Int) {
+                    if (destroyed) return
                     // Reordering is requested explicitly by an outside-list action, never by
                     // a track transition, list selection, or playback restoration.
                     recordElapsed()
                     val settings = (application as MusicApplication).settings
-                    settings.listeningHistory.flush()
+                    storage.execute { settings.listeningHistory.flush() }
                     if (reason == androidx.media3.common.Player.MEDIA_ITEM_TRANSITION_REASON_SEEK && tracker.skipped()) {
                         trackedSong?.let { settings.recordListening(it, skipped = true) }
                     }
@@ -163,20 +184,36 @@ class PlaybackService : MediaSessionService() {
             })
         }
         output.attach(player)
-        handler.post(tick)
         val openApp = android.app.PendingIntent.getActivity(this, 0,
-            android.content.Intent(this, MainActivity::class.java), android.app.PendingIntent.FLAG_IMMUTABLE)
+            android.content.Intent(this, MainActivity::class.java)
+                .setAction(MainActivity.ACTION_OPEN_PLAYER)
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT)
         session = MediaSession.Builder(this, player).setSessionActivity(openApp)
             .setCallback(object : MediaSession.Callback {
                 override fun onConnect(session: MediaSession, controller: MediaSession.ControllerInfo): MediaSession.ConnectionResult =
                     MediaSession.ConnectionResult.AcceptedResultBuilder(session)
                         .setAvailableSessionCommands(MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon()
-                            .add(SessionCommand(ANCHOR_SHUFFLE, Bundle.EMPTY)).build()).build()
+                            .add(SessionCommand(ANCHOR_SHUFFLE, Bundle.EMPTY))
+                            .add(SessionCommand(KEEP_SHUFFLE_ORDER, Bundle.EMPTY)).build()).build()
 
                 override fun onCustomCommand(session: MediaSession, controller: MediaSession.ControllerInfo,
                     customCommand: SessionCommand, args: Bundle): ListenableFuture<SessionResult> {
-                    if (customCommand.customAction != ANCHOR_SHUFFLE) return super.onCustomCommand(session, controller, customCommand, args)
-                    anchorShuffle(player)
+                    if (customCommand.customAction !in setOf(ANCHOR_SHUFFLE, KEEP_SHUFFLE_ORDER)) {
+                        return super.onCustomCommand(session, controller, customCommand, args)
+                    }
+                    if (args.getString(QUEUE_SOURCE).orEmpty() != player.playlistMetadata.extras?.getString(QUEUE_SOURCE).orEmpty()) {
+                        return Futures.immediateFuture(SessionResult(SessionResult.RESULT_ERROR_INVALID_STATE))
+                    }
+                    if (customCommand.customAction == ANCHOR_SHUFFLE) {
+                        if (args.getString("song") == player.currentMediaItem?.mediaId) anchorShuffle(player)
+                    } else if (player.shuffleModeEnabled) {
+                        val order = args.getIntArray("order")
+                        if (order != null && order.sorted() == (0 until player.mediaItemCount).toList()) {
+                            player.setShuffleOrder(DefaultShuffleOrder(order, System.nanoTime()))
+                        }
+                    }
                     return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
                 }
             }).build()
@@ -185,13 +222,13 @@ class PlaybackService : MediaSessionService() {
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
     override fun onTaskRemoved(rootIntent: android.content.Intent?) {
         recordElapsed()
-        (application as MusicApplication).settings.listeningHistory.flush()
+        storage.execute { (application as MusicApplication).settings.listeningHistory.flush() }
         savePlayback()
         if (session?.player?.playWhenReady != true) stopSelf()
     }
     override fun onDestroy() {
         recordElapsed()
-        (application as MusicApplication).settings.listeningHistory.flush()
+        storage.execute { (application as MusicApplication).settings.listeningHistory.flush() }
         savePlayback()
         destroyed = true
         preloader?.close()

@@ -10,6 +10,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -20,6 +22,7 @@ import androidx.compose.animation.core.updateTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
@@ -44,8 +47,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
@@ -151,37 +157,62 @@ fun PlayerScreen(model: MusicViewModel, shared: SharedTransitionScope, visibilit
 }
 
 private const val TitleMarqueeDelayMillis = 1800
+private val TitleMarqueeVelocity = 28.dp
+// Wide enough that the last glyph dissolves instead of being cut by a hard line.
+private val TitleFadeWidth = 24.dp
+// 24dp at 28dp/s: the leading fade is complete once the first glyph has cleared it.
+private const val TitleFadeRampMillis = 860
 
 /**
  * One-line title ticker with soft edges: the trailing edge always fades out, the leading edge only
  * once the ticker has started, so a short resting title keeps its first glyph solid.
+ *
+ * Both fades are painted by the title itself rather than by sibling overlays. A sibling is not part
+ * of the shared element, so it is skipped while the title cross-fades in the transition overlay and
+ * only covers the text once the transition lands: that read as a mask snapping over the last glyph.
+ * The width is measured during composition for the same reason, instead of via onTextLayout, which
+ * leaves a new title without its fade for the first frames.
  */
 @Composable
 private fun MarqueeTitle(text: String, modifier: Modifier = Modifier) {
     val scheme = MaterialTheme.colorScheme
-    val fadeHeight = with(LocalDensity.current) { MaterialTheme.typography.titleLarge.lineHeight.toDp() }
+    val style = MaterialTheme.typography.titleLarge.copy(color = scheme.primary, fontWeight = FontWeight.Bold)
+    val measurer = rememberTextMeasurer()
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val available = constraints.maxWidth
-        var natural by remember(text) { mutableIntStateOf(0) }
+        val natural = remember(text, style) { measurer.measure(text, style, maxLines = 1, softWrap = false).size.width }
         val overflowing = natural > available
         var ticking by remember(text) { mutableStateOf(false) }
         LaunchedEffect(text, overflowing) {
             ticking = false
             if (overflowing) { delay(TitleMarqueeDelayMillis.toLong()); ticking = true }
         }
-        Text(text, modifier = modifier.fillMaxWidth()
-            .basicMarquee(iterations = Int.MAX_VALUE, initialDelayMillis = TitleMarqueeDelayMillis, velocity = 28.dp),
-            maxLines = 1, softWrap = false, overflow = TextOverflow.Clip,
-            style = MaterialTheme.typography.titleLarge.copy(color = scheme.primary, fontWeight = FontWeight.Bold),
-            onTextLayout = { natural = it.size.width })
-        if (overflowing) {
-            Box(Modifier.align(Alignment.CenterEnd).width(20.dp).height(fadeHeight)
-                .background(Brush.horizontalGradient(listOf(scheme.primaryContainer.copy(alpha = 0f), scheme.primaryContainer))))
-            AnimatedVisibility(ticking, modifier = Modifier.align(Alignment.CenterStart), enter = fadeIn(), exit = fadeOut()) {
-                Box(Modifier.width(20.dp).height(fadeHeight)
-                    .background(Brush.horizontalGradient(listOf(scheme.primaryContainer, scheme.primaryContainer.copy(alpha = 0f)))))
-            }
+        // Seeded from the measured width so the trailing fade exists on the title's first frame;
+        // only a later width change (rotation, split screen) animates.
+        val trailing = remember(text) { Animatable(if (overflowing) 1f else 0f) }
+        LaunchedEffect(overflowing) { trailing.animateTo(if (overflowing) 1f else 0f, tween(200)) }
+        // Recreated per title, so a new title starts with a clean leading edge instead of fading
+        // the previous state out over the first glyph.
+        val leading = remember(text) { Animatable(0f) }
+        LaunchedEffect(ticking) {
+            leading.animateTo(if (ticking) 1f else 0f, tween(TitleFadeRampMillis, easing = LinearEasing))
         }
+        Text(text, modifier = modifier.fillMaxWidth()
+            // Outside basicMarquee so the fade stays pinned to the edge while the text travels.
+            .drawWithContent {
+                drawContent()
+                val width = TitleFadeWidth.toPx()
+                val background = scheme.primaryContainer
+                if (trailing.value > 0.01f) drawRect(
+                    Brush.horizontalGradient(listOf(background.copy(alpha = 0f), background),
+                        startX = size.width - width, endX = size.width), alpha = trailing.value)
+                if (leading.value > 0.01f) drawRect(
+                    Brush.horizontalGradient(listOf(background, background.copy(alpha = 0f)),
+                        startX = 0f, endX = width), alpha = leading.value)
+            }
+            .basicMarquee(iterations = Int.MAX_VALUE, initialDelayMillis = TitleMarqueeDelayMillis,
+                velocity = TitleMarqueeVelocity),
+            maxLines = 1, softWrap = false, overflow = TextOverflow.Clip, style = style)
     }
 }
 
@@ -223,9 +254,12 @@ private fun NowPlaying(model: MusicViewModel, shared: SharedTransitionScope, vis
                     onCoverClick = if (canSwitchStyle && model.playerStyleMode == PlayerStyleMode.TapToSwitch)
                         ({ model.togglePlayerStyle(displayedBold) }) else null,
                     artworkModifier = Modifier.sharedElement(rememberSharedContentState("art:${song.key}"), visibility,
-                        boundsTransform = { _, _ -> motion.defaultSpatialSpec<Rect>() }),
+                        boundsTransform = { _, _ -> motion.defaultSpatialSpec<Rect>() }, zIndexInOverlay = 1f),
                     titleTransition = boldTitle,
                     titleModifier = { titleVisibility ->
+                        // The title keeps its shared bounds in both styles so bold <-> default keeps the
+                        // continuous move; the artwork's higher overlay z-index keeps the cover on top
+                        // while the player expands from the mini player.
                         Modifier.sharedBounds(rememberSharedContentState("title:${song.id}"), titleVisibility,
                             enter = fadeIn(tween(300)), exit = fadeOut(tween(300)),
                             boundsTransform = { _, _ -> tween(300) },
@@ -275,6 +309,9 @@ internal fun SongHero(song: Song, position: Long, duration: Long,
     modifier: Modifier = Modifier, artworkModifier: Modifier = Modifier,
     titleModifier: @Composable (AnimatedVisibilityScope) -> Modifier = { Modifier }, buffering: Boolean = false,
     coverShape: Shape = MaterialShapes.Cookie9Sided.toShape(), classic: Boolean = false, onCoverClick: (() -> Unit)? = null,
+    showMetadata: Boolean = true, coverHorizontalOffset: Dp = 12.dp, showPlaybackTime: Boolean = true,
+    boldCoverLift: Dp = 16.dp, boldCoverScale: Float = 1f,
+    compactBoldTitle: Boolean = false,
     titleTransition: Transition<Boolean> = updateTransition(!classic, label = "hero-title")) {
     val title = remember(song.title) { playerTitle(song.title) }
     val scheme = MaterialTheme.colorScheme
@@ -282,7 +319,8 @@ internal fun SongHero(song: Song, position: Long, duration: Long,
     LookaheadScope {
     val lookahead = this
     BoxWithConstraints(modifier.fillMaxWidth().padding(top = 12.dp)) {
-        val boldCoverSize = (maxWidth * 0.70f).coerceAtMost(maxHeight * 0.58f)
+        val boldCoverSize = ((maxWidth * 0.70f).coerceAtMost(maxHeight * 0.58f) * boldCoverScale)
+            .coerceAtMost(maxWidth * 0.70f).coerceAtMost(maxHeight)
         val coverSize = if (classic) maxWidth.coerceAtMost((maxHeight - 48.dp).coerceAtLeast(1.dp)) else boldCoverSize
         val coverTop = if (classic) ((maxHeight - coverSize) * .35f).coerceAtLeast(0.dp) else 0.dp
         val metaWidth = (maxWidth - boldCoverSize - 8.dp).coerceAtLeast(96.dp)
@@ -293,24 +331,40 @@ internal fun SongHero(song: Song, position: Long, duration: Long,
             title.boldColumns == 4 -> 0.80f
             else -> 1f
         }
-        val titleMaxFont = (maxWidth.value * 0.28f).coerceAtMost(110f).sp
+        // Keep the two-line canvas independent of the cover. Only trim the landscape
+        // font ceiling slightly; subtracting the cover height forces every line to shrink.
+        val titleMaxFont = (maxWidth.value * if (compactBoldTitle) 0.26f else 0.28f)
+            .coerceAtMost(if (compactBoldTitle) 102f else 110f).sp
         val titleHeight = with(LocalDensity.current) { (titleMaxFont.value * 2.5f).sp.toDp() }
             .coerceAtMost(maxHeight * 0.78f)
         // Explicit breaks and a two-line limit let auto-size fit five characters across
         // for 8–10-character names, without reducing the size of shorter titles.
-        val titleMaxLines = if (title.boldColumns != null) 2 else if (title.isLongCjk) if (title.main.codePointCount(0, title.main.length) > 10) 3 else 2 else 3
+        val density = LocalDensity.current
+        val measurer = rememberTextMeasurer()
+        val titleMeasureStyle = MaterialTheme.typography.displayLarge
+        val singleLineFits = remember(title, titleMaxFont, titleFraction, maxWidth, density, measurer, titleMeasureStyle) {
+            title.boldColumns == null && !title.isShortCjk && !title.isLongCjk &&
+            '\n' !in title.boldText && measurer.measure(title.boldText,
+                style = titleMeasureStyle.copy(fontSize = (titleMaxFont.value * .70f).coerceAtLeast(24f).sp,
+                    fontWeight = FontWeight.Black), softWrap = false, maxLines = 1).size.width <=
+                with(density) { (maxWidth * titleFraction).toPx() }
+        }
+        val titleMaxLines = if (singleLineFits) 1 else if (title.boldColumns != null) 2 else if (title.isLongCjk) if (title.main.codePointCount(0, title.main.length) > 10) 3 else 2 else 3
         titleTransition.AnimatedVisibility({ it },
             modifier = Modifier.fillMaxWidth(titleFraction).height(titleHeight),
             enter = EnterTransition.None, exit = ExitTransition.None) {
-        BasicText(title.boldText, modifier = titleModifier(this).fillMaxSize().testTag("player-title"),
+        BasicText(title.boldText, modifier = titleModifier(this).fillMaxSize()
+            .then(if (compactBoldTitle) Modifier.padding(bottom = 4.dp) else Modifier).testTag("player-title"),
             style = MaterialTheme.typography.displayLarge.copy(color = scheme.primary,
+                platformStyle = if (compactBoldTitle) PlatformTextStyle(includeFontPadding = true)
+                    else MaterialTheme.typography.displayLarge.platformStyle,
                 fontWeight = FontWeight.Black, lineHeight = TextUnit.Unspecified),
             maxLines = titleMaxLines, overflow = TextOverflow.Ellipsis,
             autoSize = TextAutoSize.StepBased(minFontSize = 24.sp, maxFontSize = titleMaxFont, stepSize = 2.sp))
         }
-        AnimatedVisibility(!classic, modifier = Modifier.align(Alignment.BottomStart).width(metaWidth),
+        AnimatedVisibility(!classic && showMetadata, modifier = Modifier.align(Alignment.BottomStart).width(metaWidth),
             enter = fadeIn(tween(300)), exit = fadeOut(tween(300))) {
-        Column(Modifier.fillMaxWidth().padding(bottom = 16.dp),
+        Column(Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.Start, verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (title.version.isNotBlank()) Text(title.version, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.titleMedium, color = scheme.onSurfaceVariant)
@@ -320,15 +374,18 @@ internal fun SongHero(song: Song, position: Long, duration: Long,
                     Text(song.album, maxLines = 1, overflow = TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant)
                 }
-                BasicText("${formatTime(position)} / ${formatTime(duration)}", Modifier.fillMaxWidth(), maxLines = 1,
+                if (showPlaybackTime) BasicText("${formatTime(position)} / ${formatTime(duration)}", Modifier.fillMaxWidth(), maxLines = 1,
                     style = MaterialTheme.typography.headlineSmall.copy(color = scheme.onSurface, fontWeight = FontWeight.ExtraBold,
                         textAlign = TextAlign.Start),
                     autoSize = TextAutoSize.StepBased(minFontSize = 14.sp, maxFontSize = 25.sp))
         }
         }
+        // The bold cover sits slightly higher than the meta block, so title, artwork and the
+        // artist/time column read as one diagonal group instead of two aligned edges.
+        val coverLift = if (classic) 0.dp else boldCoverLift
         Box(Modifier.align(if (classic) Alignment.TopCenter else Alignment.BottomEnd)
             .animateBounds(lookahead, boundsTransform = { _, _ -> motion.defaultSpatialSpec() })
-            .offset(x = if (classic) 0.dp else 12.dp, y = coverTop).size(coverSize)
+            .offset(x = if (classic) 0.dp else coverHorizontalOffset, y = coverTop - coverLift).size(coverSize)
             .clip(coverShape).then(if (onCoverClick != null) Modifier.clickable(onClickLabel = "切换播放页样式", onClick = onCoverClick) else Modifier)
             .testTag("player-artwork")) {
             Artwork(song.cover, artworkModifier.fillMaxSize().clip(coverShape))
@@ -424,26 +481,58 @@ fun SeekControl(model: MusicViewModel, modifier: Modifier = Modifier) {
 
 @UnstableApi
 @Composable
-private fun LyricsContent(model: MusicViewModel) {
+internal fun LyricsContent(model: MusicViewModel, compact: Boolean = false,
+    onManualScrollChanged: ((Boolean) -> Unit)? = null) {
     val songKey = model.current?.key
     val local = model.current?.isLocal == true
     val lines = model.lyrics
     val active = activeLyric(lines, model.position)
     val state = rememberLazyListState()
+    val plainState = rememberScrollState()
+    val plain = model.plainLyrics.isNotBlank()
+    val interactionSource = if (plain) plainState.interactionSource else state.interactionSource
+    val dragging by interactionSource.collectIsDraggedAsState()
+    val scrolling = if (plain) plainState.isScrollInProgress else state.isScrollInProgress
+    var manualScroll by remember(songKey, plain) { mutableStateOf(false) }
+    val scrollCallback by rememberUpdatedState(onManualScrollChanged)
+    LaunchedEffect(dragging, scrolling, songKey, plain) {
+        if (dragging) manualScroll = true
+        scrollCallback?.invoke(manualScroll && (dragging || scrolling))
+        if (!dragging && !scrolling) manualScroll = false
+    }
+    DisposableEffect(songKey, plain) {
+        onDispose { scrollCallback?.invoke(false) }
+    }
     var follow by remember(songKey) { mutableStateOf(true) }
-    LaunchedEffect(songKey) { state.scrollToItem(0) }
+    LaunchedEffect(state, compact) {
+        if (compact) state.interactionSource.interactions.collect { interaction ->
+            if (interaction is androidx.compose.foundation.interaction.DragInteraction.Start) follow = false
+        }
+    }
+    LaunchedEffect(follow, state.isScrollInProgress) {
+        if (compact && !follow && !state.isScrollInProgress) { delay(3000); follow = true }
+    }
+    LaunchedEffect(songKey) { state.scrollToItem(0); plainState.scrollTo(0) }
     LaunchedEffect(active, follow, songKey) {
         if (follow && active >= 0 && !state.isScrollInProgress) state.animateScrollToItem((active - 1).coerceAtLeast(0))
     }
     Column(Modifier.fillMaxSize()) {
         if (model.lyricsLoading) Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) { LoadingIndicator() }
         else if (model.plainLyrics.isNotBlank()) key(songKey, model.plainLyrics) {
-            LyricsViewport {
+            LyricsViewport(compact) {
                 Column(Modifier.fillMaxSize()
-                    .verticalScroll(rememberScrollState()).padding(top = 48.dp, bottom = 64.dp)) {
-                    Text(model.plainLyrics, style = MaterialTheme.typography.headlineSmall, lineHeight = 36.sp,
+                    .verticalScroll(plainState).padding(top = if (compact) 16.dp else 48.dp, bottom = if (compact) 24.dp else 64.dp)) {
+                    Text(model.plainLyrics, style = if (compact) MaterialTheme.typography.titleLarge else MaterialTheme.typography.headlineSmall,
+                        lineHeight = if (compact) 30.sp else 36.sp,
                         modifier = Modifier.testTag("plain-lyrics"))
                 }
+            }
+        }
+        else if (lines.isEmpty() && compact) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(Icons.Rounded.Lyrics, null, Modifier.size(32.dp), tint = MaterialTheme.colorScheme.primary)
+                Text(if (model.lyricsError != null) "歌词加载失败" else "暂无歌词", color = MaterialTheme.colorScheme.primary)
+                if (model.lyricsError != null) TextButton(onClick = { model.current?.let { model.loadLyrics(it.id) } }) { Text("重试") }
             }
         }
         else if (lines.isEmpty()) EmptyState(if (local) "未找到本地歌词" else "让音乐说话",
@@ -452,13 +541,16 @@ private fun LyricsContent(model: MusicViewModel) {
                 model.current?.let { model.loadLyrics(it.id) }
             }
         else {
-            LyricsViewport {
+            LyricsViewport(compact) {
                 LazyColumn(state = state, modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(top = 48.dp, bottom = 64.dp), verticalArrangement = Arrangement.spacedBy(24.dp)) {
+                    contentPadding = PaddingValues(top = if (compact) 16.dp else 48.dp, bottom = if (compact) 24.dp else 64.dp),
+                    verticalArrangement = Arrangement.spacedBy(if (compact) 12.dp else 24.dp)) {
                     itemsIndexed(lines) { index, line ->
                         val color by animateColorAsState(if (index == active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f), MaterialTheme.motionScheme.fastEffectsSpec(), label = "lyric-highlight")
                         Column(Modifier.fillMaxWidth().clickable { model.seek(line.timeMs); follow = true }.padding(vertical = 4.dp)) {
-                            Text(line.text, color = color, fontSize = if (index == active) 28.sp else 23.sp, lineHeight = 34.sp, fontWeight = FontWeight.Bold)
+                            Text(line.text, color = color,
+                                fontSize = if (compact) { if (index == active) 24.sp else 19.sp } else { if (index == active) 28.sp else 23.sp },
+                                lineHeight = if (compact) 30.sp else 34.sp, fontWeight = FontWeight.Bold)
                             if (line.translation.isNotBlank()) Text(line.translation, Modifier.padding(top = 6.dp), color = color, style = MaterialTheme.typography.bodyMedium)
                         }
                     }
@@ -470,13 +562,13 @@ private fun LyricsContent(model: MusicViewModel) {
 
 /** Fades lyrics into the page colour at both edges instead of clipping them on a hard line. */
 @Composable
-private fun ColumnScope.LyricsViewport(content: @Composable () -> Unit) {
+private fun ColumnScope.LyricsViewport(compact: Boolean = false, content: @Composable () -> Unit) {
     val background = MaterialTheme.colorScheme.primaryContainer
     Box(Modifier.fillMaxWidth().weight(1f)) {
         content()
-        Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().height(48.dp)
+        Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().height(if (compact) 16.dp else 48.dp)
             .background(Brush.verticalGradient(listOf(background, background.copy(alpha = 0f)))))
-        Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(64.dp)
+        Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(if (compact) 24.dp else 64.dp)
             .background(Brush.verticalGradient(listOf(background.copy(alpha = 0f), background))))
     }
 }

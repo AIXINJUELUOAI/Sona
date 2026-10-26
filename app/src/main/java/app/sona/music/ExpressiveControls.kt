@@ -31,11 +31,11 @@ import androidx.graphics.shapes.RoundedPolygon
 import androidx.graphics.shapes.toPath
 import kotlinx.coroutines.delay
 
-// Eight image-friendly shapes from the official Material 3 Expressive shape library; deep-notched
-// shapes (e.g. the four-leaf clover) are left out so an overlapping cover always hides what is beneath.
+// The exact seven shapes Material 3's indeterminate loading indicator morphs through
+// (LoadingIndicatorDefaults.IndeterminateIndicatorPolygons), reused as cover masks.
 internal val coverPolygons: List<RoundedPolygon>
-    get() = listOf(MaterialShapes.Cookie9Sided, MaterialShapes.Clover8Leaf, MaterialShapes.Sunny, MaterialShapes.SoftBurst,
-        MaterialShapes.Cookie12Sided, MaterialShapes.Flower, MaterialShapes.Cookie7Sided, MaterialShapes.Puffy)
+    get() = listOf(MaterialShapes.SoftBurst, MaterialShapes.Cookie9Sided, MaterialShapes.Pentagon,
+        MaterialShapes.Pill, MaterialShapes.Sunny, MaterialShapes.Cookie4Sided, MaterialShapes.Oval)
 
 // Stable per track, so recomposition, buffering and reopening never change the crop.
 internal fun artworkShape(trackId: Long): Shape = MorphShape(coverPolygons[Math.floorMod(trackId, coverPolygons.size.toLong()).toInt()])

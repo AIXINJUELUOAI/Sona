@@ -47,6 +47,13 @@ class MusicSettings(context: Context) {
     var playerStyleMode: PlayerStyleMode
         get() = PlayerStyleMode.entries.firstOrNull { it.name == prefs.getString("player_style_mode", null) } ?: PlayerStyleMode.Default
         set(value) { prefs.edit().putString("player_style_mode", value.name).apply() }
+    // fixed / perSong / cycle: how the bold player picks its cover silhouette.
+    var coverShapeMode: String
+        get() = prefs.getString("cover_shape_mode", "perSong").orEmpty()
+        set(value) { prefs.edit().putString("cover_shape_mode", value).apply() }
+    var coverFixedShape: Int
+        get() = prefs.getInt("cover_fixed_shape", 1)
+        set(value) { prefs.edit().putInt("cover_fixed_shape", value).apply() }
     var lastBoldPlayer: Boolean
         get() = prefs.getBoolean("player_style_bold", false)
         set(value) { prefs.edit().putBoolean("player_style_bold", value).apply() }
@@ -110,7 +117,7 @@ class MusicSettings(context: Context) {
         JSONArray(prefs.getString("recent", "[]")).objects().map(::parseSong)
     }.getOrDefault(emptyList())
     @Synchronized fun rememberSong(song: Song) {
-        val songs = (listOf(song) + recentSongs()).distinctBy { it.key }.take(50)
+        val songs = (listOf(song) + recentSongs()).distinctBy { it.key }.take(200)
         val json = JSONArray(songs.map(::songJson))
         prefs.edit().putString("recent", json.toString()).apply()
         recentState.value = songs
