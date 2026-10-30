@@ -5,6 +5,7 @@ import androidx.activity.compose.LocalActivity
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
@@ -54,6 +55,9 @@ fun SonaApp(model: MusicViewModel, dark: Boolean, systemScheme: ColorScheme) {
     }
     val searchScroll = rememberLazyListState()
     val libraryScroll = rememberLazyListState()
+    // Back previews and restored settings share the same position from their first frame.
+    val floatingLyricsScroll = rememberScrollState()
+    val lyricColorsScroll = rememberScrollState()
     val savedPages = rememberSaveableStateHolder()
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -67,6 +71,8 @@ fun SonaApp(model: MusicViewModel, dark: Boolean, systemScheme: ColorScheme) {
             Page.Daily -> SongsScreen(model, model::back, dailyRecommendations = true)
             Page.Local -> LocalMusicScreen(model, preview)
             Page.Stats -> ListeningStatsScreen(model, model::back)
+            Page.FloatingLyrics -> FloatingLyricsSettingsScreen(model, floatingLyricsScroll, preview)
+            Page.LyricColors -> LyricColorsScreen(model, lyricColorsScroll)
         }
     }
     LaunchedEffect(model.error) {
@@ -272,9 +278,11 @@ private fun MiniPlayer(
                         dragging = false; drag = 0f; passedThreshold = false
                     })) {
             Row(Modifier.padding(start = 7.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                Artwork(song.cover, Modifier.size(52.dp)
+                Box(Modifier.size(52.dp)
                     .sharedElement(rememberSharedContentState("art:${song.key}"), visibility,
-                        boundsTransform = { _, _ -> motion.defaultSpatialSpec<Rect>() }, zIndexInOverlay = 1f).clip(coverShape))
+                        boundsTransform = { _, _ -> motion.defaultSpatialSpec<Rect>() }, zIndexInOverlay = 1f).clip(coverShape)) {
+                    BufferingArtwork(song, model.buffering && !model.playerExpanded, coverShape, Modifier.fillMaxSize())
+                }
                 Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                     Text(song.title, Modifier.sharedBounds(rememberSharedContentState("title:${song.id}"), visibility,
                         boundsTransform = { _, _ -> motion.defaultSpatialSpec<Rect>() }),

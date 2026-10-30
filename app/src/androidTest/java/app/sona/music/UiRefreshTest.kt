@@ -44,8 +44,8 @@ class UiRefreshTest {
                                 if (index >= 8) { Spacer(Modifier.weight(1f)); continue }
                                 val shape = artworkShape(index.toLong())
                                 Box(Modifier.weight(1f).aspectRatio(1f)) {
-                                    Artwork(cover, Modifier.fillMaxSize().padding(6.dp).clip(shape))
-                                    CoverBufferingIndicator(true, index, shape)
+                                    BufferingArtwork(Song(index.toLong(), "", "", cover = cover), true, shape,
+                                        Modifier.fillMaxSize().padding(6.dp))
                                 }
                             }
                         }

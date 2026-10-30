@@ -566,6 +566,7 @@ fun SettingsDrawer(model: MusicViewModel, drawerState: DrawerState, close: () ->
             AnimatedVisibility(settingsExpanded) {
             Surface(shape = segmentedOuterShape(1, 2), color = scheme.surfaceContainer) {
             Column(Modifier.padding(horizontal = 12.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                FloatingLyricsEntry(model) { close(); model.page = Page.FloatingLyrics }
                 DrawerPreferences(model)
             }
             }

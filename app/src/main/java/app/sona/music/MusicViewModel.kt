@@ -13,6 +13,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -35,7 +36,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.LocalDate
 
-enum class Page { Home, Search, Library, Login, Songs, Local, Daily, Stats }
+enum class Page { Home, Search, Library, Login, Songs, Local, Daily, Stats, FloatingLyrics, LyricColors }
 
 @UnstableApi
 class MusicViewModel(app: Application) : AndroidViewModel(app) {
@@ -64,8 +65,6 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
     }
     var playerExpanded by mutableStateOf(false)
     var deskMode by mutableStateOf(false)
-    var deskBold by mutableStateOf(false)
-    var deskControlsCollapsed by mutableStateOf(false)
     var deskLyricsOpen by mutableStateOf(false)
     var lyricsVisible by mutableStateOf(false)
     var queueVisible by mutableStateOf(false)
@@ -86,8 +85,9 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         PlayerStyleMode.Bold -> true
         PlayerStyleMode.TapToSwitch -> lastBoldPlayer
     }
-    var profile by mutableStateOf<Profile?>(null)
-        private set
+    var profile: Profile?
+        get() = music.favorites.profile
+        private set(value) { music.favorites.updateProfile(value) }
     var accountVisible by mutableStateOf(false)
     var localName by mutableStateOf(settings.localName)
         private set
@@ -107,8 +107,9 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var recent by mutableStateOf(settings.recentSongs())
         private set
-    var liked by mutableStateOf(emptySet<Long>())
-        private set
+    var liked: Set<Long>
+        get() = music.favorites.cloud
+        private set(value) { music.favorites.replaceCloud(value) }
     var localSongs by mutableStateOf(emptyList<Song>())
         private set
     var localSort by mutableStateOf(settings.localSort)
@@ -129,8 +130,9 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var localRefreshMessage by mutableStateOf<String?>(null)
         private set
-    var localFavorites by mutableStateOf(settings.localFavorites())
-        private set
+    var localFavorites: Set<String>
+        get() = music.favorites.local
+        private set(value) { music.favorites.local = value }
     var recommendations by mutableStateOf(emptyList<Song>())
         private set
     private var localJob: Job? = null
@@ -265,6 +267,13 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
     init {
+        viewModelScope.launch {
+            snapshotFlow { liked to localFavorites }.collect {
+                rebuildRecommendations()
+                rebuildLocalHome()
+                if (favoritesOpen) loadFavoriteSongs(refreshIds = false)
+            }
+        }
         viewModelScope.launch {
             settings.recentSongsState.collect { recent = it }
         }
@@ -458,7 +467,7 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 // Each section keeps its last successful data if another request fails.
                 attempt { discovery = withContext(Dispatchers.IO) { api.discovery() }.distinctBy { it.id } }
-                attempt { profile = if (settings.cookie.isNotBlank()) withContext(Dispatchers.IO) { api.profile() } else null }
+                attempt { music.favorites.refresh() }
                 val user = profile
                 if (user != null) {
                     attempt { lists = withContext(Dispatchers.IO) { api.lists(user.id) } }
@@ -466,7 +475,6 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
                         daily = withContext(Dispatchers.IO) { api.recommendations() }
                         dailyDate = LocalDate.now()
                     }
-                    attempt { liked = withContext(Dispatchers.IO) { api.liked(user.id) } }
                 } else { lists = emptyList(); daily = emptyList(); dailyDate = null; liked = emptySet() }
                 if (failures.isNotEmpty()) error = "部分内容未刷新：${failures.first()}"
             }
@@ -548,7 +556,7 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         if (user == null) return
         listJob = viewModelScope.launch {
             try {
-                val ids = if (refreshIds) withContext(Dispatchers.IO) { api.liked(user.id) } else liked
+                val ids = if (refreshIds) music.favorites.refreshIds(user) else liked
                 if (generation != listGeneration || profile?.id != user.id) return@launch
                 liked = ids
                 favoriteCloudSongs = favoriteCloudSongs.filter { it.id in ids }
@@ -707,20 +715,10 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun toggleLike() {
         val song = current ?: return
-        if (song.isLocal) {
-            settings.setLocalFavorite(song, !isLiked(song)); localFavorites = settings.localFavorites()
-            rebuildRecommendations()
-            rebuildLocalHome()
-            return
-        }
-        if (profile == null) { playerExpanded = false; page = Page.Login; return }
-        val value = song.id !in liked
+        if (!song.isLocal && profile == null) { playerExpanded = false; page = Page.Login; return }
         viewModelScope.launch {
             try {
-                withContext(Dispatchers.IO) { api.like(song.id, value) }
-                liked = if (value) liked + song.id else liked - song.id
-                rebuildRecommendations()
-                if (favoritesOpen) loadFavoriteSongs(refreshIds = false)
+                music.favorites.toggle(song)
             }
             catch (e: CancellationException) { throw e }
             catch (e: Exception) { error = e.message }
@@ -890,7 +888,7 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
     fun togglePlayerStyle(displayedBold: Boolean) {
-        if (!playerExpanded || lyricsVisible || queueVisible || outputVisible ||
+        if (!playerExpanded || (!deskMode && lyricsVisible) || queueVisible || outputVisible ||
             playerStyleMode != PlayerStyleMode.TapToSwitch || displayedBold != boldPlayer) return
         lastBoldPlayer = !displayedBold
         settings.lastBoldPlayer = lastBoldPlayer

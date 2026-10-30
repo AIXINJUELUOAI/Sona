@@ -13,6 +13,8 @@ class MusicApplication : Application() {
             StandaloneDatabaseProvider(this))
     }
     internal val output by lazy { PlaybackOutput(this) }
+    internal val floatingLyrics by lazy { FloatingLyricsController(this) }
+    internal val favorites by lazy { MusicFavorites(this) }
     val settings by lazy { MusicSettings(this) }
     val api by lazy { NeteaseApi({ settings.cookie }, { settings.cookie = it }) }
 }

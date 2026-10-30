@@ -15,6 +15,9 @@ import javax.crypto.spec.GCMParameterSpec
 
 class MusicSettings(context: Context) {
     private val prefs = context.getSharedPreferences("music", Context.MODE_PRIVATE)
+    internal var floatingLyrics: FloatingLyricsConfig
+        get() = FloatingLyricsConfig.decode(prefs.getString("floating_lyrics", "").orEmpty())
+        set(value) { prefs.edit().putString("floating_lyrics", value.bounded().encode()).apply() }
     private val recentState = MutableStateFlow(recentSongs())
     internal val recentSongsState = recentState.asStateFlow()
     internal val listeningHistory = ListeningHistory(context,

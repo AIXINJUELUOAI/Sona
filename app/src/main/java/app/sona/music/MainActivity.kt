@@ -23,16 +23,22 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         musicModel.setUiActive(true)
+        (application as MusicApplication).floatingLyrics.setUiVisible(true)
         musicModel.refreshLocalMusic()
     }
     override fun onStop() {
         musicModel.setUiActive(false)
+        (application as MusicApplication).floatingLyrics.setUiVisible(false)
         super.onStop()
     }
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         openIntentDestination(intent)
+    }
+    override fun onResume() {
+        super.onResume()
+        (application as MusicApplication).floatingLyrics.refreshPermission()
     }
     private fun openIntentDestination(intent: Intent) {
         if (intent.action != ACTION_OPEN_PLAYER) return
@@ -47,8 +53,6 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         savedInstanceState?.let {
             musicModel.playerExpanded = it.getBoolean("playerExpanded", musicModel.playerExpanded)
-            musicModel.deskBold = it.getBoolean("deskBold", musicModel.deskBold)
-            musicModel.deskControlsCollapsed = it.getBoolean("deskControlsCollapsed", musicModel.deskControlsCollapsed)
             musicModel.deskLyricsOpen = it.getBoolean("deskLyricsOpen", musicModel.deskLyricsOpen)
         }
         openIntentDestination(intent)
@@ -84,8 +88,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putBoolean("playerExpanded", musicModel.playerExpanded)
-        outState.putBoolean("deskBold", musicModel.deskBold)
-        outState.putBoolean("deskControlsCollapsed", musicModel.deskControlsCollapsed)
         outState.putBoolean("deskLyricsOpen", musicModel.deskLyricsOpen)
         super.onSaveInstanceState(outState)
     }

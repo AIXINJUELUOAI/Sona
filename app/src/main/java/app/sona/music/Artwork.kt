@@ -4,9 +4,11 @@ package app.sona.music
 import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.toShape
+import androidx.compose.material3.Icon
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.MusicNote
+import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -27,17 +29,18 @@ fun Artwork(url: String?, modifier: Modifier = Modifier, description: String? = 
     // The previous cover stays on screen until the next one decodes, so changing tracks never
     // flashes the placeholder. Only the very first load shows it.
     var previous by remember { mutableStateOf<Painter?>(null) }
-    var missing by remember(url, revision) { mutableStateOf(previous == null) }
+    var missing by remember(url, revision) { mutableStateOf(previous == null || url.isNullOrBlank()) }
     Box(modifier.semantics { if (description != null) contentDescription = description }, contentAlignment = Alignment.Center) {
         if (missing) {
-            Box(Modifier.matchParentSize().background(MaterialTheme.colorScheme.surfaceContainerHigh))
-            Box(Modifier.fillMaxSize(.72f).aspectRatio(1f)
-                .background(MaterialTheme.colorScheme.primary, MaterialShapes.Cookie9Sided.toShape()))
+            Box(Modifier.matchParentSize().background(MaterialTheme.colorScheme.secondaryContainer))
+            Icon(Icons.Rounded.MusicNote, null,
+                Modifier.fillMaxSize(.32f).sizeIn(maxWidth = 64.dp, maxHeight = 64.dp),
+                tint = MaterialTheme.colorScheme.onSecondaryContainer)
         }
         if (!url.isNullOrBlank()) AsyncImage(model = request, contentDescription = null,
             modifier = Modifier.matchParentSize(), contentScale = ContentScale.Crop,
             placeholder = previous,
-            onLoading = { missing = previous == null }, onError = { missing = previous == null },
+            onLoading = { missing = previous == null }, onError = { missing = true },
             onSuccess = { state ->
                 previous = state.painter
                 missing = false

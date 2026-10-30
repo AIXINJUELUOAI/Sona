@@ -12,23 +12,62 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
+import androidx.media3.session.CommandButton
 import android.os.Bundle
+import android.provider.Settings
+import android.widget.Toast
+import androidx.compose.runtime.snapshotFlow
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import com.google.common.util.concurrent.SettableFuture
 import androidx.media3.common.Player
 import androidx.media3.common.MediaMetadata
 import androidx.media3.exoplayer.source.ShuffleOrder.DefaultShuffleOrder
 import java.util.concurrent.Executors
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 
 @UnstableApi
 class PlaybackService : MediaSessionService() {
     companion object {
         const val ANCHOR_SHUFFLE = "app.sona.music.ANCHOR_SHUFFLE"
         const val KEEP_SHUFFLE_ORDER = "app.sona.music.KEEP_SHUFFLE_ORDER"
+        const val TOGGLE_FLOATING_LYRICS = "app.sona.music.TOGGLE_FLOATING_LYRICS"
+        const val TOGGLE_FAVORITE = "app.sona.music.TOGGLE_FAVORITE"
         const val QUEUE_SOURCE = "sona_queue_source"
     }
     private var session: MediaSession? = null
     private var preloader: AudioPreloader? = null
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val lyricsCommand = SessionCommand(TOGGLE_FLOATING_LYRICS, Bundle.EMPTY)
+    private val favoriteCommand = SessionCommand(TOGGLE_FAVORITE, Bundle.EMPTY)
+
+    private fun mediaButtons(player: Player?): List<CommandButton> {
+        val app = application as MusicApplication
+        val enabled = app.floatingLyrics.options.enabled
+        val song = player?.currentMediaItem?.let(::songFromItem)
+        val liked = song?.let(app.favorites::isLiked) == true
+        return listOf(
+        CommandButton.Builder(CommandButton.ICON_UNDEFINED)
+            .setCustomIconResId(if (enabled) R.drawable.ic_lyrics_word_on else R.drawable.ic_lyrics_word)
+            .setDisplayName(if (enabled) "关闭悬浮歌词" else "开启悬浮歌词")
+            .setSessionCommand(lyricsCommand)
+            // Use an additional action slot, preserving the primary playback controls.
+            .setSlots(CommandButton.SLOT_OVERFLOW)
+            .build(),
+        CommandButton.Builder(CommandButton.ICON_UNDEFINED)
+            .setCustomIconResId(if (liked) R.drawable.ic_media_favorite_on else R.drawable.ic_media_favorite)
+            .setDisplayName(if (liked) "取消收藏" else "收藏")
+            .setSessionCommand(favoriteCommand)
+            .setEnabled(song != null && !app.favorites.changing)
+            .setSlots(CommandButton.SLOT_OVERFLOW)
+            .build())
+    }
+    private fun refreshButtons(player: Player? = session?.player) { session?.setMediaButtonPreferences(mediaButtons(player)) }
     private val storage = Executors.newSingleThreadExecutor()
     private var restoring = true
     private var applyingRestore = false
@@ -152,6 +191,7 @@ class PlaybackService : MediaSessionService() {
                 override fun onEvents(player: Player, events: Player.Events) {
                     if (destroyed) return
                     preloader?.update(player)
+                    if (events.containsAny(Player.EVENT_MEDIA_ITEM_TRANSITION, Player.EVENT_MEDIA_METADATA_CHANGED)) refreshButtons(player)
                     if (restoring && !applyingRestore && player.mediaItemCount > 0) restoreAllowed = false
                     if (events.containsAny(Player.EVENT_TIMELINE_CHANGED, Player.EVENT_MEDIA_METADATA_CHANGED, Player.EVENT_PLAYLIST_METADATA_CHANGED,
                             Player.EVENT_POSITION_DISCONTINUITY, Player.EVENT_PLAY_WHEN_READY_CHANGED,
@@ -191,15 +231,48 @@ class PlaybackService : MediaSessionService() {
                     android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP),
             android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT)
         session = MediaSession.Builder(this, player).setSessionActivity(openApp)
+            .setMediaButtonPreferences(mediaButtons(player))
             .setCallback(object : MediaSession.Callback {
                 override fun onConnect(session: MediaSession, controller: MediaSession.ControllerInfo): MediaSession.ConnectionResult =
                     MediaSession.ConnectionResult.AcceptedResultBuilder(session)
                         .setAvailableSessionCommands(MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon()
                             .add(SessionCommand(ANCHOR_SHUFFLE, Bundle.EMPTY))
+                            .add(lyricsCommand)
+                            .add(favoriteCommand)
                             .add(SessionCommand(KEEP_SHUFFLE_ORDER, Bundle.EMPTY)).build()).build()
 
                 override fun onCustomCommand(session: MediaSession, controller: MediaSession.ControllerInfo,
                     customCommand: SessionCommand, args: Bundle): ListenableFuture<SessionResult> {
+                    if (customCommand.customAction == TOGGLE_FLOATING_LYRICS) {
+                        val lyrics = (application as MusicApplication).floatingLyrics
+                        val enabled = !lyrics.options.enabled
+                        if (enabled && !Settings.canDrawOverlays(this@PlaybackService)) {
+                            Toast.makeText(this@PlaybackService, "请先在 Sona → 设置 → 悬浮歌词中允许悬浮窗权限", Toast.LENGTH_LONG).show()
+                            return Futures.immediateFuture(SessionResult(SessionResult.RESULT_ERROR_PERMISSION_DENIED))
+                        }
+                        lyrics.update(lyrics.options.copy(enabled = enabled))
+                        refreshButtons(player)
+                        return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+                    }
+                    if (customCommand.customAction == TOGGLE_FAVORITE) {
+                        val app = application as MusicApplication
+                        val song = player.currentMediaItem?.let(::songFromItem)
+                            ?: return Futures.immediateFuture(SessionResult(SessionResult.RESULT_ERROR_INVALID_STATE))
+                        if (app.favorites.changing) return Futures.immediateFuture(SessionResult(SessionResult.RESULT_ERROR_INVALID_STATE))
+                        val result = SettableFuture.create<SessionResult>()
+                        serviceScope.launch {
+                            try {
+                                app.favorites.toggle(song)
+                                refreshButtons(player)
+                                result.set(SessionResult(SessionResult.RESULT_SUCCESS))
+                            } catch (e: CancellationException) { result.cancel(false); throw e }
+                            catch (e: Exception) {
+                                Toast.makeText(this@PlaybackService, e.message ?: "收藏未完成，请重试", Toast.LENGTH_LONG).show()
+                                result.set(SessionResult(SessionResult.RESULT_ERROR_UNKNOWN))
+                            }
+                        }
+                        return result
+                    }
                     if (customCommand.customAction !in setOf(ANCHOR_SHUFFLE, KEEP_SHUFFLE_ORDER)) {
                         return super.onCustomCommand(session, controller, customCommand, args)
                     }
@@ -217,6 +290,18 @@ class PlaybackService : MediaSessionService() {
                     return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
                 }
             }).build()
+        (application as MusicApplication).floatingLyrics.attach(player)
+        serviceScope.launch {
+            val app = application as MusicApplication
+            snapshotFlow { listOf(app.floatingLyrics.options.enabled, app.favorites.cloud, app.favorites.local, app.favorites.changing) }.collect {
+                refreshButtons(player)
+            }
+        }
+        serviceScope.launch {
+            try { (application as MusicApplication).favorites.refresh(force = false) }
+            catch (e: CancellationException) { throw e }
+            catch (e: Exception) { android.util.Log.w("SonaFavorites", "Favorite state not refreshed", e) }
+        }
         restorePlayback(player)
     }
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
@@ -227,6 +312,8 @@ class PlaybackService : MediaSessionService() {
         if (session?.player?.playWhenReady != true) stopSelf()
     }
     override fun onDestroy() {
+        serviceScope.cancel()
+        (application as MusicApplication).floatingLyrics.detach()
         recordElapsed()
         storage.execute { (application as MusicApplication).settings.listeningHistory.flush() }
         savePlayback()
