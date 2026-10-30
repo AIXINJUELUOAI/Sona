@@ -175,6 +175,8 @@ class PlaybackService : MediaSessionService() {
             .onFailure { android.util.Log.w("PlaybackService", "Audio cache unavailable", it) }.getOrNull()
         val output = (application as MusicApplication).output
         val player = ExoPlayer.Builder(this).setMediaSourceFactory(DefaultMediaSourceFactory(preloader?.playbackSource ?: source))
+            // Apply the same previous-track policy to app, notification and media-button commands.
+            .setMaxSeekToPreviousPositionMs(Long.MAX_VALUE)
             .setAudioOutputProvider(output.audioOutputProvider()).build().apply {
             setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(), true)
             setHandleAudioBecomingNoisy(true)

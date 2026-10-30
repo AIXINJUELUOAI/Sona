@@ -3,8 +3,8 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val sonaVersionCode = providers.gradleProperty("sonaVersionCode").orNull?.toIntOrNull() ?: 2
-val sonaVersionName = providers.gradleProperty("sonaVersionName").orNull ?: "1.0.0 beta1"
+val sonaVersionCode = providers.gradleProperty("sonaVersionCode").orNull?.toIntOrNull() ?: 11
+val sonaVersionName = providers.gradleProperty("sonaVersionName").orNull ?: "1.0 Beta"
 
 android {
     namespace = "app.sona.music"
